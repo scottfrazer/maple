@@ -13,6 +13,7 @@ import (
 )
 
 type WorkflowSources struct {
+	done    *chan bool
 	id      uuid.UUID
 	wdl     string
 	inputs  string
@@ -24,7 +25,7 @@ func (s WorkflowSources) String() string {
 }
 
 var WorkflowChannel chan WorkflowSources
-var WorkflowMaxRunTime = time.Second * 2
+var WorkflowMaxRunTime = time.Second * 30
 var dispatcherAbortChannel chan bool
 var isDispatcherAlive = false
 
@@ -55,6 +56,7 @@ func HttpEndpoint(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sources := WorkflowSources{
+		nil,
 		uuid.NewV4(),
 		strings.TrimSpace(wdl),
 		strings.TrimSpace(inputs),
@@ -122,7 +124,13 @@ func subprocess(cmd *exec.Cmd, name string, done chan<- string, subprocess_abort
 }
 
 func workflowWorker(sources WorkflowSources, done chan<- string, wg *sync.WaitGroup) {
-	defer wg.Done()
+	defer func() {
+		if sources.done != nil {
+			*sources.done <- true
+		}
+		wg.Done()
+	}()
+
 	fmt.Printf("workflow start\n")
 	defer fmt.Printf("workflow end\n")
 
@@ -147,7 +155,7 @@ func workflowWorker(sources WorkflowSources, done chan<- string, wg *sync.WaitGr
 		calls <- "B"
 		time.Sleep(time.Second * 3)
 		calls <- "C"
-		time.Sleep(time.Second * 12)
+		time.Sleep(time.Second * 3)
 		calls <- "D"
 		//close(calls)
 	}()
@@ -210,7 +218,7 @@ func workflowDispatcher(max int) {
 	}
 
 	for {
-		fmt.Printf("dispatcher: [workers: %d used / %d max], [queue %d used  / %s max]\n", workers, max, len(WorkflowChannel), "?")
+		fmt.Printf("dispatcher: [workers: %d used / %d max], [queue %d used / %s max]\n", workers, max, len(WorkflowChannel), "?")
 		if workers < max {
 			select {
 			case wf := <-WorkflowChannel:
@@ -259,27 +267,28 @@ func isAlive() bool {
 	return isDispatcherAlive
 }
 
-func bug() {
-	for {
-		if isAlive() {
-			select {
-			case <-time.After(time.Second * 20):
-				fmt.Println("\n\n!!!!!!!!!!! 20 seconds is up ... aborting dispatcher !!!!!!!!!!!!!!!\n\n")
-				AbortDispatcher()
-			}
-		} else {
-			select {
-			case <-time.After(time.Second * 1):
-				fmt.Println("\n\n!!!!!!!!!!! 1 second later ... create dispatcher !!!!!!!!!!!!!!!\n\n")
-				StartDispatcher(5, 20)
-			}
-		}
-	}
+// Main API here
+
+func StartWorkflow(wdl, inputs, options string) (chan bool, uuid.UUID) {
+	id := uuid.NewV4()
+	done := make(chan bool, 1)
+
+	sources := WorkflowSources{
+		&done,
+		id,
+		strings.TrimSpace(wdl),
+		strings.TrimSpace(inputs),
+		strings.TrimSpace(options)}
+
+	WorkflowChannel <- sources
+
+	return done, id
 }
 
 func main() {
 	StartDispatcher(20, 20)
+	done, _ := StartWorkflow("wdl", "inputs", "options")
+	<-done
 	http.HandleFunc("/submit", HttpEndpoint)
-	//go bug()
 	http.ListenAndServe(":8000", nil)
 }
