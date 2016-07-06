@@ -13,18 +13,36 @@ import (
 )
 
 type WorkflowSources struct {
-	done    *chan bool
-	id      uuid.UUID
 	wdl     string
 	inputs  string
 	options string
 }
 
-func (s WorkflowSources) String() string {
-	return fmt.Sprintf("<workflow %s>", s.id)
+type WorkflowSubmission struct {
+	id      uuid.UUID
+	done    *chan bool
+	sources WorkflowSources
 }
 
-var WorkflowChannel chan WorkflowSources
+type CallStatus struct {
+	call    string
+	index   int
+	attempt int
+	status  string
+}
+
+type WorkflowContext struct {
+	id     uuid.UUID
+	done   *chan bool
+	source WorkflowSources
+	status *[]CallStatus
+}
+
+func (s WorkflowSources) String() string {
+	return fmt.Sprintf("<workflow %s>", s.wdl)
+}
+
+var SubmissionChannel chan WorkflowSubmission
 var WorkflowMaxRunTime = time.Second * 30
 var dispatcherAbortChannel chan bool
 var isDispatcherAlive = false
@@ -55,12 +73,8 @@ func HttpEndpoint(w http.ResponseWriter, r *http.Request) {
 		options = string(bytes)
 	}
 
-	sources := WorkflowSources{
-		nil,
-		uuid.NewV4(),
-		strings.TrimSpace(wdl),
-		strings.TrimSpace(inputs),
-		strings.TrimSpace(options)}
+	sources := WorkflowSources{strings.TrimSpace(wdl), strings.TrimSpace(inputs), strings.TrimSpace(options)}
+	submission := WorkflowSubmission{uuid.NewV4(), nil, sources}
 
 	fmt.Printf("HTTP endpoint /submit/ received: %s\n", sources)
 	defer func() {
@@ -72,7 +86,7 @@ func HttpEndpoint(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	select {
-	case WorkflowChannel <- sources:
+	case SubmissionChannel <- submission:
 	case <-time.After(time.Millisecond * 500):
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusRequestTimeout)
@@ -123,16 +137,17 @@ func subprocess(cmd *exec.Cmd, name string, done chan<- string, subprocess_abort
 	}
 }
 
-func workflowWorker(sources WorkflowSources, done chan<- string, wg *sync.WaitGroup) {
+func workflowWorker(context WorkflowContext, done chan<- string, wg *sync.WaitGroup) {
 	defer func() {
-		if sources.done != nil {
-			*sources.done <- true
+		if context.done != nil {
+			*context.done <- true
+			close(*context.done)
 		}
 		wg.Done()
 	}()
 
-	fmt.Printf("workflow start\n")
-	defer fmt.Printf("workflow end\n")
+	fmt.Printf("workflow %s: start\n", context.id)
+	defer fmt.Printf("workflow %s: end\n", context.id)
 
 	var subprocess_done = make(chan string)
 	var subprocess_abort = make(map[string]chan bool)
@@ -146,7 +161,7 @@ func workflowWorker(sources WorkflowSources, done chan<- string, wg *sync.WaitGr
 			v <- true
 		}
 		workflow_terminal = true
-		done <- fmt.Sprintf("aborted:%s", sources.id)
+		done <- fmt.Sprintf("aborted:%s", context.id)
 	}
 
 	go func() {
@@ -163,34 +178,34 @@ func workflowWorker(sources WorkflowSources, done chan<- string, wg *sync.WaitGr
 	for !workflow_terminal {
 		select {
 		case <-timeout:
-			fmt.Printf("workflow %s: done (timeout %s)\n", sources.id, WorkflowMaxRunTime)
+			fmt.Printf("workflow %s: done (timeout %s)\n", context.id, WorkflowMaxRunTime)
 			abortSubprocesses()
 			return
 		case call := <-calls:
-			fmt.Printf("workflow %s: launching call: %s\n", sources.id, call)
+			fmt.Printf("workflow %s: launching call: %s\n", context.id, call)
 			subprocess_abort[call] = make(chan bool, 1)
 			go subprocess(exec.Command("sleep", "2"), call, subprocess_done, subprocess_abort[call])
 		case status := <-subprocess_done:
-			fmt.Printf("workflow %s: subprocess finished: %s\n", sources.id, status)
+			fmt.Printf("workflow %s: subprocess finished: %s\n", context.id, status)
 			var split = strings.Split(status, ":")
 			var call = split[0]
 			var sts = split[1]
 			call_status[call] = sts
-			fmt.Printf("workflow %s: len(call_status) = %d\n", sources.id, len(call_status))
+			fmt.Printf("workflow %s: len(call_status) = %d\n", context.id, len(call_status))
 			if len(call_status) == 4 {
-				fmt.Printf("workflow %s: terminal workflow\n", sources.id)
+				fmt.Printf("workflow %s: terminal workflow\n", context.id)
 				var status = "done"
 				for _, v := range call_status {
 					if v != "done" {
 						status = "failed"
 					}
 				}
-				done <- fmt.Sprintf("%s:%s", status, sources.id)
+				done <- fmt.Sprintf("%s:%s", status, context.id)
 				workflow_terminal = true
 			}
 		case _, ok := <-dispatcherAbortChannel:
 			if !ok {
-				fmt.Printf("workflow %s: aborting...\n", sources.id)
+				fmt.Printf("workflow %s: aborting...\n", context.id)
 				abortSubprocesses()
 				return
 			}
@@ -212,19 +227,21 @@ func workflowDispatcher(max int) {
 
 	var kill = func() {
 		fmt.Println("dispatcher: abort signal received...")
-		close(WorkflowChannel)
+		close(SubmissionChannel)
 		wg.Wait()
 		fmt.Println("dispatcher: aborted")
 	}
 
 	for {
-		fmt.Printf("dispatcher: [workers: %d used / %d max], [queue %d used / %s max]\n", workers, max, len(WorkflowChannel), "?")
+		fmt.Printf("dispatcher: [workers: %d used / %d max], [queued: %d]\n", workers, max, len(SubmissionChannel))
 		if workers < max {
 			select {
-			case wf := <-WorkflowChannel:
+			case wf := <-SubmissionChannel:
 				workers++
 				wg.Add(1)
-				go workflowWorker(wf, done, &wg)
+				sts := make([]CallStatus, 5)
+				ctx := WorkflowContext{wf.id, wf.done, wf.sources, &sts}
+				go workflowWorker(ctx, done, &wg)
 			case d := <-done:
 				processDone(d)
 			case _, ok := <-dispatcherAbortChannel:
@@ -249,7 +266,7 @@ func workflowDispatcher(max int) {
 
 func StartDispatcher(workers int, buffer int) {
 	if !isDispatcherAlive {
-		WorkflowChannel = make(chan WorkflowSources, buffer)
+		SubmissionChannel = make(chan WorkflowSubmission, buffer)
 		dispatcherAbortChannel = make(chan bool)
 		go workflowDispatcher(workers)
 		isDispatcherAlive = true
@@ -274,21 +291,22 @@ func StartWorkflow(wdl, inputs, options string) (chan bool, uuid.UUID) {
 	done := make(chan bool, 1)
 
 	sources := WorkflowSources{
-		&done,
-		id,
 		strings.TrimSpace(wdl),
 		strings.TrimSpace(inputs),
 		strings.TrimSpace(options)}
 
-	WorkflowChannel <- sources
+	submission := WorkflowSubmission{id, &done, sources}
+
+	SubmissionChannel <- submission
 
 	return done, id
 }
 
 func main() {
-	StartDispatcher(20, 20)
-	done, _ := StartWorkflow("wdl", "inputs", "options")
-	<-done
-	http.HandleFunc("/submit", HttpEndpoint)
-	http.ListenAndServe(":8000", nil)
+	StartDispatcher(1000, 10000)
+	for i := 0; i < 4000; i++ {
+		StartWorkflow("wdl", "inputs", "options")
+	}
+	//http.HandleFunc("/submit", HttpEndpoint)
+	//http.ListenAndServe(":8000", nil)
 }
