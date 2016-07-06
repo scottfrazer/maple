@@ -102,13 +102,11 @@ func HttpEndpoint(w http.ResponseWriter, r *http.Request) {
 }
 
 func subprocess(cmd *exec.Cmd, name string, done chan<- string, subprocess_abort <-chan bool) {
-	fmt.Printf("subprocess: start %s\n", cmd.Path)
-	defer fmt.Printf("subprocess: end %s\n", cmd.Path)
-	var proc_done_channel = make(chan bool, 1)
+	var cmdDone = make(chan bool, 1)
 
 	go func() {
 		cmd.Run()
-		proc_done_channel <- true
+		cmdDone <- true
 	}()
 
 	var kill = func(status string) {
@@ -121,7 +119,7 @@ func subprocess(cmd *exec.Cmd, name string, done chan<- string, subprocess_abort
 
 	for {
 		select {
-		case <-proc_done_channel:
+		case <-cmdDone:
 			var status = "done"
 			if cmd.ProcessState == nil {
 				status = "no-create"
@@ -318,10 +316,14 @@ func RunWorkflow(wdl, inputs, options string, id uuid.UUID) WorkflowExecutionRes
 	return result
 }
 
+func AbortWorkflow(id uuid.UUID) {
+	return
+}
+
 func main() {
 	StartDispatcher(1000, 4000)
 	var wg sync.WaitGroup
-	for i := 0; i < 100; i++ {
+	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func() {
 			RunWorkflow("wdl", "inputs", "options", uuid.NewV4())
@@ -330,6 +332,8 @@ func main() {
 		time.Sleep(time.Millisecond * 10)
 	}
 	wg.Wait()
-	//http.HandleFunc("/submit", HttpEndpoint)
-	//http.ListenAndServe(":8000", nil)
+
+	fmt.Println("Listening on :8000 ...")
+	http.HandleFunc("/submit", HttpEndpoint)
+	http.ListenAndServe(":8000", nil)
 }
