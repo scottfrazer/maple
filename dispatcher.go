@@ -239,6 +239,7 @@ func workflowDispatcher(max int) {
 
 	var processDone = func(result WorkflowExecutionResult) {
 		fmt.Printf("dispatcher: workflow %s finished: %s\n", result.id, result.status)
+		<-DbSetStatusAsync(fmt.Sprintf("%s", result.id), result.status)
 		workers--
 	}
 
@@ -258,6 +259,7 @@ func workflowDispatcher(max int) {
 				wg.Add(1)
 				sts := make([]CallStatus, 5)
 				ctx := WorkflowContext{wf.id, wf.done, wf.sources, &sts}
+				<-DbSetStatusAsync(fmt.Sprintf("%s", wf.id), "Started")
 				go workflowWorker(ctx, done, &wg)
 			case d := <-done:
 				processDone(d)
@@ -309,10 +311,14 @@ func RunWorkflow(wdl, inputs, options string, id uuid.UUID) WorkflowExecutionRes
 		strings.TrimSpace(inputs),
 		strings.TrimSpace(options)}
 
+	<-DbSetStatusAsync(fmt.Sprintf("%s", id), "NotStarted")
+
 	submission := WorkflowSubmission{id, &done, sources}
 	SubmissionChannel <- submission
 	result := <-done
-	fmt.Printf("--- Workflow Completed: %s\n", id)
+
+	wfStatus := <-DbGetStatusAsync(fmt.Sprintf("%s", id))
+	fmt.Printf("--- Workflow Completed: %s (status %s)\n", id, wfStatus)
 	return result
 }
 
@@ -322,6 +328,8 @@ func AbortWorkflow(id uuid.UUID) {
 
 func main() {
 	StartDispatcher(1000, 4000)
+	StartDbDispatcher()
+
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
