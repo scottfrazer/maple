@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	_ "github.com/mattn/go-sqlite3"
-	//"github.com/satori/go.uuid"
+	"github.com/satori/go.uuid"
 	"log"
 	"time"
 )
@@ -47,58 +47,154 @@ func tables(db *sql.DB) []string {
 	return tables
 }
 
-var Dbms = "sqlite3"
-var DbmsConnectionString = "DB"
-var DbActionChannel = make(chan interface{}, 4000)
-
-type DbSetStatus struct {
-	wfCtx  *WorkflowContext
-	time   Time
-	status string
-	done   *chan bool
-}
-
-type DbGetStatus struct {
-	uuid string
-	done chan string
-}
-
-func DbSetStatusAsync(uuid, status string) chan bool {
-	done := make(chan bool, 1)
-	DbActionChannel <- DbSetStatus{uuid, status, &done}
-	return done
-}
-
-func DbGetStatusAsync(uuid string) chan string {
-	done := make(chan string, 1)
-	DbActionChannel <- DbGetStatus{uuid, done}
-	return done
-}
-
-func createWorkflowStatusTable(db *sql.DB) {
-	var query = `CREATE TABLE workflow_status (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		uuid TEXT,
-		status TEXT,
-		date TEXT
-	);`
+func query(db *sql.DB, query string) {
 	fmt.Printf("[db] %s\n", query)
 	_, err := db.Exec(query)
 	e(err)
 }
 
-func setStatus(db *sql.DB, uuid string, status string) {
+func setup(db *sql.DB) {
+	var tableNames = tables(db)
+
+	if !contains("workflow", tableNames) {
+		query(db, `CREATE TABLE workflow (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			uuid TEXT
+		);`)
+	}
+
+	if !contains("workflow_status", tableNames) {
+		query(db, `CREATE TABLE workflow_status (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			workflow_id INTEGER NOT NULL,
+			status TEXT,
+			date TEXT,
+			FOREIGN KEY(workflow_id) REFERENCES workflow(id)
+		);`)
+	}
+
+	if !contains("workflow_sources", tableNames) {
+		query(db, `CREATE TABLE workflow_sources (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			workflow_id INTEGER NOT NULL,
+			wdl TEXT,
+			inputs TEXT,
+			options TEXT,
+			FOREIGN KEY(workflow_id) REFERENCES workflow(id)
+		);`)
+	}
+}
+
+var Dbms = "sqlite3"
+var DbmsConnectionString = "DB"
+var DbActionChannel = make(chan interface{}, 4000)
+
+type DbSubmitWorkflow struct {
+	uuid    uuid.UUID
+	sources *WorkflowSources
+	done    chan int64
+}
+
+type DbSetStatus struct {
+	wfId   WorkflowIdentifier
+	time   time.Time
+	status string
+	done   *chan bool
+}
+
+type DbGetStatus struct {
+	wfId WorkflowIdentifier
+	done chan string
+}
+
+func DbCreateWorkflowAsync(uuid uuid.UUID, sources *WorkflowSources) chan int64 {
+	done := make(chan int64, 1)
+	DbActionChannel <- DbSubmitWorkflow{uuid, sources, done}
+	return done
+}
+
+func DbSetStatusAsync(wfId WorkflowIdentifier, status string) chan bool {
+	done := make(chan bool, 1)
+	DbActionChannel <- DbSetStatus{wfId, time.Now(), status, &done}
+	return done
+}
+
+func DbGetStatusAsync(wfId WorkflowIdentifier) chan string {
+	done := make(chan string, 1)
+	DbActionChannel <- DbGetStatus{wfId, done}
+	return done
+}
+
+func dbSubmitWorkflow(db *sql.DB, uuid uuid.UUID, sources *WorkflowSources) int64 {
+	var success = true
+	var workflowId int64 = -1
+
+	tx, err := db.Begin()
+	e(err)
+
+	defer func() {
+		if success {
+			tx.Commit()
+		} else {
+			tx.Rollback()
+		}
+		e(err)
+	}()
+
+	res, err := tx.Exec(`INSERT INTO workflow (uuid) VALUES (?)`, uuid)
+	e(err)
+
+	workflowId, err = res.LastInsertId()
+	e(err)
+
+	rows, err := res.RowsAffected()
+	e(err)
+
+	if rows != 1 {
+		panic("could not insert into 'workflow' table")
+		success = false
+		return -1
+	}
+
+	res, err = tx.Exec(`INSERT INTO workflow_sources (workflow_id, wdl, inputs, options) VALUES (?, ?, ?, ?)`, workflowId, sources.wdl, sources.inputs, sources.options)
+	e(err)
+
+	rows, err = res.RowsAffected()
+	e(err)
+
+	if rows != 1 {
+		panic("could not insert into 'workflow_sources' table")
+		success = false
+		return -1
+	}
+
+	res, err = tx.Exec(`INSERT INTO workflow_status (workflow_id, status, date) VALUES (?, 'NotStarted', ?)`, workflowId, time.Now().Format("2006-01-02 15:04:05.999"))
+	e(err)
+
+	rows, err = res.RowsAffected()
+	e(err)
+
+	if rows != 1 {
+		panic("could not insert into 'workflow_status' table")
+		success = false
+		return -1
+	}
+
+	return workflowId
+}
+
+func dbSetStatus(db *sql.DB, obj DbSetStatus) {
 	var nowISO8601 = time.Now().Format("2006-01-02 15:04:05.999")
-	var query = `INSERT INTO workflow_status (uuid, status, date) VALUES (?, ?, ?)`
-	fmt.Printf("[db] %s -- [%s, %s, %s]\n", query, uuid, status, nowISO8601)
-	_, err := db.Exec(query, uuid, status, nowISO8601)
+	var query = `INSERT INTO workflow_status (workflow_id, status, date) VALUES (?, ?, ?)`
+	fmt.Printf("[db] %s -- [%d, %s, %s]\n", query, obj.wfId.dbKey(), obj.status, nowISO8601)
+	_, err := db.Exec(query, obj.wfId.dbKey(), obj.status, nowISO8601)
 	e(err)
 }
 
-func getStatus(db *sql.DB, uuid string) string {
-	var query = `SELECT status FROM workflow_status WHERE uuid=? ORDER BY datetime(date) DESC, id DESC LIMIT 1`
-	fmt.Printf("[db] %s -- [%s]\n", query, uuid)
-	row := db.QueryRow(query, uuid)
+func dbGetStatus(db *sql.DB, wfId WorkflowIdentifier) string {
+	var query = `SELECT status FROM workflow_status WHERE workflow_id=? ORDER BY datetime(date) DESC, id DESC LIMIT 1`
+	fmt.Printf("[db] %s -- [%s]\n", query, wfId.dbKey())
+	row := db.QueryRow(query, wfId.dbKey())
 	var status string
 	err := row.Scan(&status)
 	e(err)
@@ -113,27 +209,26 @@ func dbDispatcher() {
 		log.Fatal(err)
 	}
 
+	setup(db)
+
 	defer func() {
 		db.Close()
 		isDbDispatcherStarted = false
 	}()
-
-	var tableNames = tables(db)
-	if !contains("workflow_status", tableNames) {
-		createWorkflowStatusTable(db)
-	}
 
 	for {
 		select {
 		case action := <-DbActionChannel:
 			switch t := action.(type) {
 			case DbSetStatus:
-				setStatus(db, t.uuid, t.status)
+				dbSetStatus(db, t)
 				if t.done != nil {
 					*t.done <- true
 				}
 			case DbGetStatus:
-				t.done <- getStatus(db, t.uuid)
+				t.done <- dbGetStatus(db, t.wfId)
+			case DbSubmitWorkflow:
+				t.done <- dbSubmitWorkflow(db, t.uuid, t.sources)
 			default:
 				fmt.Printf("[db] Invalid DB Action: %T. Value %v\n", t, t)
 			}

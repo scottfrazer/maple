@@ -12,16 +12,15 @@ import (
 	"time"
 )
 
+type WorkflowIdentifier interface {
+	dbKey() int64
+	id() uuid.UUID
+}
+
 type WorkflowSources struct {
 	wdl     string
 	inputs  string
 	options string
-}
-
-type WorkflowSubmission struct {
-	id      uuid.UUID
-	done    *chan WorkflowExecutionResult
-	sources WorkflowSources
 }
 
 type CallStatus struct {
@@ -32,23 +31,27 @@ type CallStatus struct {
 }
 
 type WorkflowContext struct {
-	id     uuid.UUID
-	done   *chan WorkflowExecutionResult
-	source WorkflowSources
-	status *[]CallStatus
-}
-
-type WorkflowExecutionResult struct {
-	id         uuid.UUID
+	uuid       uuid.UUID
+	primaryKey int64
+	done       chan WorkflowContext
+	source     *WorkflowSources
 	status     string
 	callStatus *[]CallStatus
+}
+
+func (c WorkflowContext) id() uuid.UUID {
+	return c.uuid
+}
+
+func (c WorkflowContext) dbKey() int64 {
+	return c.primaryKey
 }
 
 func (s WorkflowSources) String() string {
 	return fmt.Sprintf("<workflow %s>", s.wdl)
 }
 
-var SubmissionChannel chan WorkflowSubmission
+var SubmissionChannel chan WorkflowContext
 var WorkflowMaxRunTime = time.Second * 30
 var dispatcherAbortChannel chan bool
 var isDispatcherAlive = false
@@ -79,8 +82,12 @@ func HttpEndpoint(w http.ResponseWriter, r *http.Request) {
 		options = string(bytes)
 	}
 
+	// TODO: maybe DbCretaeWorkflowAsync really should be DbCreateWorkflow and return WorkflowContext
+
 	sources := WorkflowSources{strings.TrimSpace(wdl), strings.TrimSpace(inputs), strings.TrimSpace(options)}
-	submission := WorkflowSubmission{uuid.NewV4(), nil, sources}
+	uuid := uuid.NewV4()
+	primaryKey := <-DbCreateWorkflowAsync(uuid, &sources)
+	submission := WorkflowContext{uuid, primaryKey, make(chan WorkflowContext, 1), &sources, "NotStarted", nil}
 
 	fmt.Printf("HTTP endpoint /submit/ received: %s\n", sources)
 	defer func() {
@@ -143,21 +150,17 @@ func subprocess(cmd *exec.Cmd, name string, done chan<- string, subprocess_abort
 	}
 }
 
-func workflowWorker(context WorkflowContext, done chan<- WorkflowExecutionResult, wg *sync.WaitGroup) {
+func workflowWorker(context WorkflowContext, done chan<- WorkflowContext, wg *sync.WaitGroup) {
 
-	fmt.Printf("workflow %s: start\n", context.id)
-
-	var callStatus = make([]CallStatus, 20)
-	var result = WorkflowExecutionResult{context.id, "NotStarted", &callStatus}
+	fmt.Printf("workflow %s: start\n", context.uuid)
+	<-DbSetStatusAsync(&context, "Started")
 
 	defer func() {
-		if context.done != nil {
-			*context.done <- result
-			close(*context.done)
-		}
-		done <- result
+		context.done <- context
+		close(context.done)
+		done <- context
 		wg.Done()
-		fmt.Printf("workflow %s: end\n", context.id)
+		fmt.Printf("workflow %s: end\n", context.uuid)
 	}()
 
 	var runningCalls = 0
@@ -172,7 +175,7 @@ func workflowWorker(context WorkflowContext, done chan<- WorkflowExecutionResult
 		for _, v := range subprocess_abort {
 			v <- true
 		}
-		result.status = "Aborted"
+		context.status = "Aborted"
 	}
 
 	go func() {
@@ -187,11 +190,11 @@ func workflowWorker(context WorkflowContext, done chan<- WorkflowExecutionResult
 	for {
 		select {
 		case <-timeout:
-			fmt.Printf("workflow %s: done (timeout %s)\n", context.id, WorkflowMaxRunTime)
+			fmt.Printf("workflow %s: done (timeout %s)\n", context.uuid, WorkflowMaxRunTime)
 			abortSubprocesses()
 			return
 		case call := <-calls:
-			fmt.Printf("workflow %s: launching call: %s\n", context.id, call)
+			fmt.Printf("workflow %s: launching call: %s\n", context.uuid, call)
 			subprocess_abort[call] = make(chan bool, 1)
 			if call == "EXIT" {
 				exitSentinal = true
@@ -200,7 +203,7 @@ func workflowWorker(context WorkflowContext, done chan<- WorkflowExecutionResult
 				go subprocess(exec.Command("sleep", "2"), call, subprocess_done, subprocess_abort[call])
 			}
 		case status := <-subprocess_done:
-			fmt.Printf("workflow %s: subprocess finished: %s\n", context.id, status)
+			fmt.Printf("workflow %s: subprocess finished: %s\n", context.uuid, status)
 			runningCalls--
 			var split = strings.Split(status, ":")
 			var call = split[0]
@@ -217,12 +220,12 @@ func workflowWorker(context WorkflowContext, done chan<- WorkflowExecutionResult
 					a[i] = fmt.Sprintf("%s=%d", k, v)
 					i++
 				}
-				result.status = strings.Join(a, ",")
+				context.status = strings.Join(a, ",")
 				return
 			}
 		case _, ok := <-dispatcherAbortChannel:
 			if !ok {
-				fmt.Printf("workflow %s: aborting...\n", context.id)
+				fmt.Printf("workflow %s: aborting...\n", context.uuid)
 				abortSubprocesses()
 				return
 			}
@@ -232,14 +235,14 @@ func workflowWorker(context WorkflowContext, done chan<- WorkflowExecutionResult
 
 func workflowDispatcher(max int) {
 	var workers = 0
-	var done = make(chan WorkflowExecutionResult)
+	var done = make(chan WorkflowContext)
 	var wg sync.WaitGroup
 	fmt.Printf("dispatcher: enter\n")
 	defer fmt.Printf("dispatcher: exit\n")
 
-	var processDone = func(result WorkflowExecutionResult) {
-		fmt.Printf("dispatcher: workflow %s finished: %s\n", result.id, result.status)
-		<-DbSetStatusAsync(fmt.Sprintf("%s", result.id), result.status)
+	var processDone = func(result WorkflowContext) {
+		fmt.Printf("dispatcher: workflow %s finished: %s\n", result.uuid, result.status)
+		<-DbSetStatusAsync(result, result.status)
 		workers--
 	}
 
@@ -257,10 +260,7 @@ func workflowDispatcher(max int) {
 				fmt.Printf("dispatcher: starting worker [workers: %d used / %d max], [queued: %d]\n", workers, max, len(SubmissionChannel))
 				workers++
 				wg.Add(1)
-				sts := make([]CallStatus, 5)
-				ctx := WorkflowContext{wf.id, wf.done, wf.sources, &sts}
-				<-DbSetStatusAsync(fmt.Sprintf("%s", wf.id), "Started")
-				go workflowWorker(ctx, done, &wg)
+				go workflowWorker(wf, done, &wg)
 			case d := <-done:
 				processDone(d)
 			case _, ok := <-dispatcherAbortChannel:
@@ -285,7 +285,7 @@ func workflowDispatcher(max int) {
 
 func StartDispatcher(workers int, buffer int) {
 	if !isDispatcherAlive {
-		SubmissionChannel = make(chan WorkflowSubmission, buffer)
+		SubmissionChannel = make(chan WorkflowContext, buffer)
 		dispatcherAbortChannel = make(chan bool)
 		go workflowDispatcher(workers)
 		isDispatcherAlive = true
@@ -303,21 +303,16 @@ func IsAlive() bool {
 	return isDispatcherAlive
 }
 
-func RunWorkflow(wdl, inputs, options string, id uuid.UUID) WorkflowExecutionResult {
-	done := make(chan WorkflowExecutionResult, 1)
+func RunWorkflow(wdl, inputs, options string, id uuid.UUID) WorkflowContext {
+	sources := WorkflowSources{strings.TrimSpace(wdl), strings.TrimSpace(inputs), strings.TrimSpace(options)}
+	primaryKey := <-DbCreateWorkflowAsync(id, &sources)
+	done := make(chan WorkflowContext, 1)
+	submission := WorkflowContext{id, primaryKey, done, &sources, "NotStarted", nil}
 
-	sources := WorkflowSources{
-		strings.TrimSpace(wdl),
-		strings.TrimSpace(inputs),
-		strings.TrimSpace(options)}
-
-	<-DbSetStatusAsync(fmt.Sprintf("%s", id), "NotStarted")
-
-	submission := WorkflowSubmission{id, &done, sources}
 	SubmissionChannel <- submission
 	result := <-done
 
-	wfStatus := <-DbGetStatusAsync(fmt.Sprintf("%s", id))
+	wfStatus := <-DbGetStatusAsync(submission)
 	fmt.Printf("--- Workflow Completed: %s (status %s)\n", id, wfStatus)
 	return result
 }
@@ -331,7 +326,7 @@ func main() {
 	StartDbDispatcher()
 
 	var wg sync.WaitGroup
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 1000; i++ {
 		wg.Add(1)
 		go func() {
 			RunWorkflow("wdl", "inputs", "options", uuid.NewV4())
