@@ -7,6 +7,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/satori/go.uuid"
 	"log"
+	"strings"
 	"time"
 )
 
@@ -114,7 +115,7 @@ type DbGetStatus struct {
 }
 
 type DbGetByStatus struct {
-	status string
+	status []string
 	done   chan []*WorkflowContext
 }
 
@@ -142,7 +143,7 @@ func DbGetStatusAsync(wfId WorkflowIdentifier) chan string {
 	return done
 }
 
-func DbGetByStatusAsync(status string) chan []*WorkflowContext {
+func DbGetByStatusAsync(status ...string) chan []*WorkflowContext {
 	done := make(chan []*WorkflowContext, 1)
 	DbActionChannel <- DbGetByStatus{status, done}
 	return done
@@ -290,10 +291,20 @@ func dbGetStatus(db *sql.DB, wfId WorkflowIdentifier) string {
 	return status
 }
 
-func dbGetByStatus(db *sql.DB, status string) ([]*WorkflowContext, error) {
-	var query = `SELECT workflow_id FROM (SELECT workflow_id, status, MAX(date) FROM workflow_status GROUP BY workflow_id) WHERE status=?;`
-	fmt.Printf("[db] %s -- [%s]\n", query, status)
-	rows, err := db.Query(query, status)
+func dbGetByStatus(db *sql.DB, status []string) ([]*WorkflowContext, error) {
+	questionMarks := make([]string, len(status))
+	for i := 0; i < len(status); i++ {
+		questionMarks[i] = "?"
+	}
+	var query = `SELECT workflow_id FROM (SELECT workflow_id, status, MAX(date) FROM workflow_status GROUP BY workflow_id) WHERE status IN (` + strings.Join(questionMarks, ", ") + `);`
+	fmt.Printf("[db] %s -- [%s]\n", query, strings.Join(status, ", "))
+
+	queryParams := make([]interface{}, len(status))
+	for i := range status {
+		queryParams[i] = status[i]
+	}
+
+	rows, err := db.Query(query, queryParams...)
 	if err != nil {
 		return nil, err
 	}
