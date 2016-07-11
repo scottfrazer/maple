@@ -164,29 +164,19 @@ func workflowWorker(context *WorkflowContext, done chan<- *WorkflowContext, abor
 	var timeout = time.After(WorkflowMaxRunTime)
 
 	defer func() {
-		fmt.Printf("===== workflow %s: DEFER FUNC 0\n", context.uuid)
 		context.done <- context
-		fmt.Printf("===== workflow %s: DEFER FUNC 1\n", context.uuid)
 		close(context.done)
-		fmt.Printf("===== workflow %s: DEFER FUNC 2\n", context.uuid)
 		done <- context
-		fmt.Printf("===== workflow %s: DEFER FUNC 3\n", context.uuid)
 		subprocessWaitGroup.Wait()
-		fmt.Printf("===== workflow %s: DEFER FUNC 4\n", context.uuid)
-		fmt.Printf("workflow %s: end\n", context.uuid)
 	}()
 
 	var abortSubprocesses = func() {
-		fmt.Printf("===== workflow %s: ABORT aborting subprocesses\n", context.uuid)
 		for _, v := range subprocessAbort {
 			close(v)
 		}
-		fmt.Printf("===== workflow %s: ABORT wait for subprocesses to return\n", context.uuid)
 		subprocessWaitGroup.Wait()
-		fmt.Printf("===== workflow %s: ABORT set status to Aborted\n", context.uuid)
 		<-DbSetStatusAsync(context, "Aborted")
 		context.status = "Aborted"
-		fmt.Printf("===== workflow %s: ABORT done\n", context.uuid)
 	}
 
 	var doneCalls = make(chan string)
@@ -263,7 +253,7 @@ func workflowDispatcher(max, buffer int) {
 	var isAborting = false
 	var done = make(chan *WorkflowContext)
 	var workflowAbort = make(map[string]chan bool)
-	var runningWorkflows = make(map[uuid.UUID]*WorkflowContext)
+	var runningWorkflows = make(map[string]*WorkflowContext)
 
 	fmt.Printf("dispatcher: enter\n")
 	defer func() {
@@ -273,13 +263,11 @@ func workflowDispatcher(max, buffer int) {
 
 	var abortWorkflows = func() {
 		submissionChannelMutex.Lock()
-		fmt.Printf("===== dispatcher ABORT: closing SubmissionChannel...\n")
 		close(SubmissionChannel)
 		isDispatcherAlive = false
 		submissionChannelMutex.Unlock()
 
 		isAborting = true
-		fmt.Println("===== dispatcher ABORT: closing workflow abort channels...")
 		for _, v := range workflowAbort {
 			close(v)
 		}
@@ -287,22 +275,17 @@ func workflowDispatcher(max, buffer int) {
 
 	var processDone = func(result *WorkflowContext) {
 		fmt.Printf("dispatcher: workflow %s finished: %s\n", result.uuid, result.status)
-		<-DbSetStatusAsync(result, result.status)
 		delete(workflowAbort, fmt.Sprintf("%s", result.uuid))
-		delete(runningWorkflows, result.uuid)
+		delete(runningWorkflows, fmt.Sprintf("%s", result.uuid))
 		workers--
 	}
 
 	for {
-		fmt.Println("dispatcher: INFINITE LOOP")
 		if isAborting {
-			fmt.Printf("ABORTING! isAborting is TRUE\n")
 			select {
 			case d := <-done:
 				processDone(d)
-				fmt.Printf("ABORTING!  Running Workflows = %d\n", len(runningWorkflows))
 				if len(runningWorkflows) == 0 {
-					fmt.Printf("ABORTING!  RETURNING\n")
 					return
 				}
 			}
@@ -311,8 +294,7 @@ func workflowDispatcher(max, buffer int) {
 			case wfContext := <-SubmissionChannel:
 				// wf can be a new workflow, or a workflow in progress (restart)
 				workers++
-				fmt.Printf("dispatcher: starting workflow %s [%d used, %d max, %d queued]\n", wfContext.uuid, workers, max, len(SubmissionChannel))
-				runningWorkflows[wfContext.uuid] = wfContext
+				runningWorkflows[fmt.Sprintf("%s", wfContext.uuid)] = wfContext
 				abortChannel := make(chan bool, 1)
 				workflowAbort[fmt.Sprintf("%s", wfContext.uuid)] = abortChannel
 				go workflowWorker(wfContext, done, abortChannel)
@@ -341,11 +323,12 @@ func StartDispatcher(workers int, buffer int) {
 }
 
 func AbortDispatcher() {
-	fmt.Printf("===== AbortDispatcher: closing dispatcherAbortChannel...\n")
 	close(dispatcherAbortChannel)
-	fmt.Printf("===== AbortDispatcher: waiting for dispatcherWaitGroup...\n")
 	dispatcherWaitGroup.Wait()
-	fmt.Printf("===== AbortDispatcher: EXIT\n")
+}
+
+func WaitForDispatcherToExit() {
+	dispatcherWaitGroup.Wait()
 }
 
 func IsAlive() bool {
@@ -360,7 +343,6 @@ func SubmitWorkflow(wdl, inputs, options string, id uuid.UUID) *WorkflowContext 
 	ctx := <-DbNewWorkflowAsync(uuid, &sources)
 	submissionChannelMutex.Lock()
 	defer submissionChannelMutex.Unlock()
-	fmt.Printf("===== SubmitWorkflow: LOCK: isDispatcherAlive = %v\n", isDispatcherAlive)
 	if isDispatcherAlive == true {
 		SubmissionChannel <- ctx
 	} else {
@@ -389,9 +371,9 @@ func SignalHandler() {
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		sig := <-sigs
-		fmt.Printf("%s signal detected!  Aborting dispatcher...\n", sig)
+		fmt.Printf("%s signal detected... aborting dispatcher\n", sig)
 		AbortDispatcher()
-		fmt.Printf("%s signal detected!  Aborted.\n", sig)
+		fmt.Printf("%s signal detected... aborted dispatcher\n", sig)
 		os.Exit(130)
 	}()
 }
@@ -401,11 +383,11 @@ func main() {
 	StartDbDispatcher()
 	SignalHandler()
 
-	go func() {
+	/*go func() {
 		fmt.Println("Listening on :8000 ...")
 		http.HandleFunc("/submit", HttpEndpoint)
 		http.ListenAndServe(":8000", nil)
-	}()
+	}()*/
 
 	if len(os.Args) < 2 {
 		fmt.Println("usage: %s <run|restart>")
@@ -429,7 +411,7 @@ func main() {
 
 	if os.Args[1] == "run" {
 		if len(os.Args) < 3 {
-			fmt.Println("usage: %s run <job_count>")
+			fmt.Printf("usage: %s run <job_count>\n", os.Args[0])
 			os.Exit(1)
 		}
 		var wg sync.WaitGroup
@@ -443,5 +425,9 @@ func main() {
 			time.Sleep(time.Millisecond * 10)
 		}
 		wg.Wait()
+	}
+
+	if isDispatcherAlive == false {
+		WaitForDispatcherToExit()
 	}
 }
