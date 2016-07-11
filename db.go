@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/satori/go.uuid"
@@ -89,10 +90,15 @@ var Dbms = "sqlite3"
 var DbmsConnectionString = "DB"
 var DbActionChannel = make(chan interface{}, 4000)
 
-type DbSubmitWorkflow struct {
+type DbNewWorkflow struct {
 	uuid    uuid.UUID
 	sources *WorkflowSources
-	done    chan int64
+	done    chan *WorkflowContext
+}
+
+type DbLoadWorkflow struct {
+	uuid uuid.UUID
+	done chan *WorkflowContext
 }
 
 type DbSetStatus struct {
@@ -107,9 +113,20 @@ type DbGetStatus struct {
 	done chan string
 }
 
-func DbCreateWorkflowAsync(uuid uuid.UUID, sources *WorkflowSources) chan int64 {
-	done := make(chan int64, 1)
-	DbActionChannel <- DbSubmitWorkflow{uuid, sources, done}
+type DbGetByStatus struct {
+	status string
+	done   chan []*WorkflowContext
+}
+
+func DbNewWorkflowAsync(uuid uuid.UUID, sources *WorkflowSources) chan *WorkflowContext {
+	done := make(chan *WorkflowContext, 1)
+	DbActionChannel <- DbNewWorkflow{uuid, sources, done}
+	return done
+}
+
+func DbLoadWorkflowAsync(uuid uuid.UUID) chan *WorkflowContext {
+	done := make(chan *WorkflowContext, 1)
+	DbActionChannel <- DbLoadWorkflow{uuid, done}
 	return done
 }
 
@@ -125,62 +142,134 @@ func DbGetStatusAsync(wfId WorkflowIdentifier) chan string {
 	return done
 }
 
-func dbSubmitWorkflow(db *sql.DB, uuid uuid.UUID, sources *WorkflowSources) int64 {
-	var success = true
+func DbGetByStatusAsync(status string) chan []*WorkflowContext {
+	done := make(chan []*WorkflowContext, 1)
+	DbActionChannel <- DbGetByStatus{status, done}
+	return done
+}
+
+func dbLoadWorkflowFromUUID(db *sql.DB, uuid uuid.UUID) (*WorkflowContext, error) {
+	var context WorkflowContext
+	var sources WorkflowSources
+
+	context.uuid = uuid
+	context.done = make(chan *WorkflowContext)
+	context.source = &sources
+
+	query := `SELECT id FROM workflow WHERE uuid=?`
+	fmt.Printf("[db] %s [%s]\n", query, uuid)
+	row := db.QueryRow(query, uuid)
+	err := row.Scan(&context.primaryKey)
+	if err != nil {
+		return nil, err
+	}
+
+	return _dbLoadWorkflowFromPrimaryKey(db, &context, context.primaryKey)
+}
+
+func dbLoadWorkflowFromPrimaryKey(db *sql.DB, primaryKey int64) (*WorkflowContext, error) {
+	var context WorkflowContext
+	context.primaryKey = primaryKey
+
+	query := `SELECT uuid FROM workflow WHERE id=?`
+	fmt.Printf("[db] %s [%s]\n", query, primaryKey)
+	row := db.QueryRow(query, primaryKey)
+	err := row.Scan(&context.uuid)
+	if err != nil {
+		return nil, err
+	}
+
+	return _dbLoadWorkflowFromPrimaryKey(db, &context, primaryKey)
+}
+
+func _dbLoadWorkflowFromPrimaryKey(db *sql.DB, context *WorkflowContext, primaryKey int64) (*WorkflowContext, error) {
+	var sources WorkflowSources
+
+	context.done = make(chan *WorkflowContext)
+	context.status = dbGetStatus(db, context)
+
+	query := `SELECT wdl, inputs, options FROM workflow_sources WHERE workflow_id=?`
+	fmt.Printf("[db] %s [%d]\n", query, context.primaryKey)
+	row := db.QueryRow(query, context.primaryKey)
+	err := row.Scan(&sources.wdl, &sources.inputs, &sources.options)
+	if err != nil {
+		return nil, err
+	}
+	context.source = &sources
+
+	return context, nil
+}
+
+func dbNewWorkflow(db *sql.DB, uuid uuid.UUID, sources *WorkflowSources) (*WorkflowContext, error) {
+	var success = false
 	var workflowId int64 = -1
 
 	tx, err := db.Begin()
-	e(err)
 
 	defer func() {
-		if success {
-			tx.Commit()
-		} else {
-			tx.Rollback()
+		if tx != nil {
+			if success {
+				tx.Commit()
+			} else {
+				tx.Rollback()
+			}
 		}
-		e(err)
 	}()
 
+	if err != nil {
+		return nil, err
+	}
+
 	res, err := tx.Exec(`INSERT INTO workflow (uuid) VALUES (?)`, uuid)
-	e(err)
+	if err != nil {
+		return nil, err
+	}
 
 	workflowId, err = res.LastInsertId()
-	e(err)
+	if err != nil {
+		return nil, err
+	}
 
 	rows, err := res.RowsAffected()
-	e(err)
+	if err != nil {
+		return nil, err
+	}
 
 	if rows != 1 {
-		panic("could not insert into 'workflow' table")
-		success = false
-		return -1
+		return nil, errors.New("could not insert into 'workflow' table")
 	}
 
 	res, err = tx.Exec(`INSERT INTO workflow_sources (workflow_id, wdl, inputs, options) VALUES (?, ?, ?, ?)`, workflowId, sources.wdl, sources.inputs, sources.options)
-	e(err)
+	if err != nil {
+		return nil, err
+	}
 
 	rows, err = res.RowsAffected()
-	e(err)
+	if err != nil {
+		return nil, err
+	}
 
 	if rows != 1 {
-		panic("could not insert into 'workflow_sources' table")
-		success = false
-		return -1
+		return nil, errors.New("could not insert into 'workflow_sources' table")
 	}
 
 	res, err = tx.Exec(`INSERT INTO workflow_status (workflow_id, status, date) VALUES (?, 'NotStarted', ?)`, workflowId, time.Now().Format("2006-01-02 15:04:05.999"))
-	e(err)
-
-	rows, err = res.RowsAffected()
-	e(err)
-
-	if rows != 1 {
-		panic("could not insert into 'workflow_status' table")
-		success = false
-		return -1
+	if err != nil {
+		return nil, err
 	}
 
-	return workflowId
+	rows, err = res.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+
+	if rows != 1 {
+		return nil, errors.New("could not insert into 'workflow_status' table")
+	}
+
+	ctx := WorkflowContext{uuid, workflowId, make(chan *WorkflowContext, 1), sources, "NotStarted", nil}
+	success = true
+	return &ctx, nil
 }
 
 func dbSetStatus(db *sql.DB, obj DbSetStatus) {
@@ -193,7 +282,7 @@ func dbSetStatus(db *sql.DB, obj DbSetStatus) {
 
 func dbGetStatus(db *sql.DB, wfId WorkflowIdentifier) string {
 	var query = `SELECT status FROM workflow_status WHERE workflow_id=? ORDER BY datetime(date) DESC, id DESC LIMIT 1`
-	fmt.Printf("[db] %s -- [%s]\n", query, wfId.dbKey())
+	fmt.Printf("[db] %s -- [%d]\n", query, wfId.dbKey())
 	row := db.QueryRow(query, wfId.dbKey())
 	var status string
 	err := row.Scan(&status)
@@ -201,12 +290,39 @@ func dbGetStatus(db *sql.DB, wfId WorkflowIdentifier) string {
 	return status
 }
 
+func dbGetByStatus(db *sql.DB, status string) ([]*WorkflowContext, error) {
+	var query = `SELECT workflow_id FROM (SELECT workflow_id, status, MAX(date) FROM workflow_status GROUP BY workflow_id) WHERE status=?;`
+	fmt.Printf("[db] %s -- [%s]\n", query, status)
+	rows, err := db.Query(query, status)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var contexts []*WorkflowContext
+	for rows.Next() {
+		var id int64
+		err = rows.Scan(&id)
+		e(err)
+		context, err := dbLoadWorkflowFromPrimaryKey(db, id)
+		e(err)
+		contexts = append(contexts, context)
+	}
+
+	err = rows.Err()
+	if err != nil {
+		return nil, err
+	}
+
+	return contexts, nil
+}
+
 var isDbDispatcherStarted = false
 
 func dbDispatcher() {
-	db, err := sql.Open("sqlite3", "DB")
+	db, err := sql.Open(Dbms, DbmsConnectionString)
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 
 	setup(db)
@@ -227,8 +343,28 @@ func dbDispatcher() {
 				}
 			case DbGetStatus:
 				t.done <- dbGetStatus(db, t.wfId)
-			case DbSubmitWorkflow:
-				t.done <- dbSubmitWorkflow(db, t.uuid, t.sources)
+			case DbGetByStatus:
+				uuids, err := dbGetByStatus(db, t.status)
+				if err != nil {
+					fmt.Printf("dbGetByStatus failed: %s", err)
+					continue
+				}
+				t.done <- uuids
+			case DbNewWorkflow:
+				ctx, err := dbNewWorkflow(db, t.uuid, t.sources)
+				if err != nil {
+					fmt.Printf("dbNewWorkflow failed: %s", err)
+					continue
+				}
+				t.done <- ctx
+			case DbLoadWorkflow:
+				fmt.Printf("DbLoadWorkflow %s\n", t.uuid)
+				ctx, err := dbLoadWorkflowFromUUID(db, t.uuid)
+				if err != nil {
+					fmt.Printf("dbLoadWorkflow failed: %s", err)
+					continue
+				}
+				t.done <- ctx
 			default:
 				fmt.Printf("[db] Invalid DB Action: %T. Value %v\n", t, t)
 			}
@@ -242,27 +378,3 @@ func StartDbDispatcher() {
 		isDbDispatcherStarted = true
 	}
 }
-
-/*func main() {
-	db, err := sql.Open("sqlite3", "DB")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer db.Close()
-
-	go dbDispatcher(db)
-
-	for i := 0; i < 0; i++ {
-		DbActionChannel <- DbSetStatus{fmt.Sprintf("uuid-%d", i), "sts", nil}
-	}
-
-	var id = uuid.NewV4()
-	DbActionChannel <- DbSetStatus{fmt.Sprintf("%s", id), "Started", nil}
-	time.Sleep(time.Second)
-	DbActionChannel <- DbSetStatus{fmt.Sprintf("%s", id), "Doing Stuff", nil}
-	time.Sleep(time.Second)
-	DbActionChannel <- DbSetStatus{fmt.Sprintf("%s", id), "Done-ish", nil}
-	var done = make(chan string)
-	DbActionChannel <- DbGetStatus{fmt.Sprintf("%s", id), done}
-	fmt.Println(<-done)
-}*/
