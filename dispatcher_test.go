@@ -8,19 +8,16 @@ import (
 )
 
 func TestStartDispatcher(t *testing.T) {
-	if IsAlive() {
-		t.Fatalf("Expecting the dispatcher to start as not being alive")
-	}
-	StartDispatcher(1, 1)
-	if IsAlive() {
+	wd := NewDispatcher(1, 1)
+	if !wd.IsAlive() {
 		t.Fatalf("Expecting the dispatcher to be alive after starting it")
 	}
 }
 
 func TestRunWorkflow(t *testing.T) {
 	StartDbDispatcher()
-	StartDispatcher(1, 1)
-	context := RunWorkflow("wdl", "inputs", "options", uuid.NewV4())
+	wd := NewDispatcher(1, 1)
+	context := wd.RunWorkflow("wdl", "inputs", "options", uuid.NewV4())
 	if context.status != "Done" {
 		t.Fatalf("Expecting workflow status to be 'Done'")
 	}
