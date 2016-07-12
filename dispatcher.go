@@ -118,8 +118,9 @@ func SubmitHttpEndpoint(wd *WorkflowDispatcher) http.HandlerFunc {
 	}
 }
 
-func runJob(cmd *exec.Cmd, name string, done chan<- string, jobAbort <-chan bool, wg *sync.WaitGroup) {
+func (wd *WorkflowDispatcher) runJob(cmd *exec.Cmd, name string, done chan<- string, jobAbort <-chan bool, wg *sync.WaitGroup) {
 	var cmdDone = make(chan bool, 1)
+	var log = wd.log
 	defer wg.Done()
 
 	go func() {
@@ -144,7 +145,7 @@ func runJob(cmd *exec.Cmd, name string, done chan<- string, jobAbort <-chan bool
 			} else if !cmd.ProcessState.Success() {
 				status = "failed"
 			}*/
-			fmt.Printf("subprocess: finish with: %s\n", status)
+			log.Info("subprocess: finish with: %s", status)
 			done <- fmt.Sprintf("%s:%s", name, status)
 			return
 		case _, ok := <-jobAbort:
@@ -157,7 +158,9 @@ func runJob(cmd *exec.Cmd, name string, done chan<- string, jobAbort <-chan bool
 }
 
 func (wd *WorkflowDispatcher) runWorkflow(context *WorkflowContext, workflowResultsChannel chan<- *WorkflowContext, workflowAbortChannel <-chan bool) {
-	fmt.Printf("workflow %s: start\n", context.uuid)
+	var log = wd.log.ForWorkflow(context.uuid)
+
+	log.Info("runWorkflow: start")
 	<-DbSetStatusAsync(context, "Started")
 	context.status = "Started"
 
@@ -174,6 +177,7 @@ func (wd *WorkflowDispatcher) runWorkflow(context *WorkflowContext, workflowResu
 		close(context.done)
 		workflowResultsChannel <- context
 		jobWaitGroup.Wait()
+		log.Info("runWorkflow: end")
 	}()
 
 	var abortSubprocesses = func() {
@@ -216,26 +220,26 @@ func (wd *WorkflowDispatcher) runWorkflow(context *WorkflowContext, workflowResu
 	for {
 		select {
 		case <-workflowTimeout:
-			fmt.Printf("workflow %s: done (timeout %s)\n", context.uuid, wd.workflowMaxRuntime)
+			log.Info("workflow %s: done (timeout %s)", context.uuid, wd.workflowMaxRuntime)
 			abortSubprocesses()
 			return
 		case call := <-calls:
-			fmt.Printf("workflow %s: launching call: %s\n", context.uuid, call)
+			log.Info("workflow %s: launching call: %s", context.uuid, call)
 			jobAbort[call] = make(chan bool, 1)
 			jobWaitGroup.Add(1)
-			go runJob(exec.Command("sleep", "2"), call, jobDone, jobAbort[call], &jobWaitGroup)
+			go wd.runJob(exec.Command("sleep", "2"), call, jobDone, jobAbort[call], &jobWaitGroup)
 		case <-workflowDone:
 			context.status = "Done"
 			<-DbSetStatusAsync(context, "Done")
 			return
 		case status := <-jobDone:
-			fmt.Printf("workflow %s: subprocess finished: %s\n", context.uuid, status)
+			log.Info("workflow %s: subprocess finished: %s", context.uuid, status)
 			var split = strings.Split(status, ":")
 			var call = split[0]
 			doneCalls <- call
 		case _, ok := <-workflowAbortChannel:
 			if !ok {
-				fmt.Printf("workflow %s: aborting...\n", context.uuid)
+				log.Info("workflow %s: aborting...", context.uuid)
 				abortSubprocesses()
 				return
 			}
@@ -249,11 +253,12 @@ func (wd *WorkflowDispatcher) runDispatcher() {
 	var workflowDone = make(chan *WorkflowContext)
 	var workflowAbort = make(map[string]chan bool)
 	var runningWorkflows = make(map[string]*WorkflowContext)
+	var log = wd.log
 
-	fmt.Printf("dispatcher: enter\n")
+	log.Info("dispatcher: enter")
 	defer func() {
 		wd.waitGroup.Done()
-		fmt.Printf("dispatcher: exit\n")
+		log.Info("dispatcher: exit")
 	}()
 
 	var abort = func() {
@@ -269,7 +274,7 @@ func (wd *WorkflowDispatcher) runDispatcher() {
 	}
 
 	var processDone = func(result *WorkflowContext) {
-		fmt.Printf("dispatcher: workflow %s finished: %s\n", result.uuid, result.status)
+		log.Info("dispatcher: workflow %s finished: %s", result.uuid, result.status)
 		delete(workflowAbort, fmt.Sprintf("%s", result.uuid))
 		delete(runningWorkflows, fmt.Sprintf("%s", result.uuid))
 		workers--
@@ -292,7 +297,7 @@ func (wd *WorkflowDispatcher) runDispatcher() {
 				runningWorkflows[fmt.Sprintf("%s", wfContext.uuid)] = wfContext
 				workflowAbortChannel := make(chan bool, 1)
 				workflowAbort[fmt.Sprintf("%s", wfContext.uuid)] = workflowAbortChannel
-				fmt.Printf("dispatcher: starting %s\n", wfContext.uuid)
+				log.Info("dispatcher: starting %s", wfContext.uuid)
 				go wd.runWorkflow(wfContext, workflowDone, workflowAbortChannel)
 			case d := <-workflowDone:
 				processDone(d)
@@ -317,7 +322,6 @@ func (wd *WorkflowDispatcher) runDispatcher() {
 func NewDispatcher(workers int, buffer int) *WorkflowDispatcher {
 	var waitGroup sync.WaitGroup
 	var mutex sync.Mutex
-	logger := NewLogger("my.log", 1000)
 
 	mutex.Lock()
 	defer mutex.Unlock()
@@ -330,7 +334,7 @@ func NewDispatcher(workers int, buffer int) *WorkflowDispatcher {
 		make(chan bool),
 		&waitGroup,
 		time.Second * 30,
-		logger}
+		GlobalLogger}
 
 	waitGroup.Add(1)
 	go wd.runDispatcher()
@@ -381,7 +385,7 @@ func (wd *WorkflowDispatcher) RunWorkflow(wdl, inputs, options string, id uuid.U
 	}
 	result := <-ctx.done
 	wfStatus := <-DbGetStatusAsync(ctx)
-	fmt.Printf("--- Workflow Completed: %s (status %s)\n", id, wfStatus)
+	wd.log.Info("--- Workflow Completed: %s (status %s)", id, wfStatus)
 	return result
 }
 
@@ -394,9 +398,9 @@ func SignalHandler(wd *WorkflowDispatcher) {
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func(wd *WorkflowDispatcher) {
 		sig := <-sigs
-		fmt.Printf("%s signal detected... aborting dispatcher\n", sig)
+		wd.log.Info("%s signal detected... aborting dispatcher", sig)
 		wd.Abort()
-		fmt.Printf("%s signal detected... aborted dispatcher\n", sig)
+		wd.log.Info("%s signal detected... aborted dispatcher", sig)
 		os.Exit(130)
 	}(wd)
 }
