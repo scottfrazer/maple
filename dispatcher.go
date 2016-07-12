@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"github.com/satori/go.uuid"
 	"io"
@@ -15,6 +16,16 @@ import (
 	"syscall"
 	"time"
 )
+
+type WorkflowDispatcher struct {
+	isAlive            bool
+	maxWorkers         int
+	submitChannel      chan *WorkflowContext
+	submitChannelMutex *sync.Mutex
+	abortChannel       chan bool
+	waitGroup          *sync.WaitGroup
+	workflowMaxRuntime time.Duration
+}
 
 type WorkflowIdentifier interface {
 	dbKey() int64
@@ -54,14 +65,6 @@ func (c WorkflowContext) dbKey() int64 {
 func (s WorkflowSources) String() string {
 	return fmt.Sprintf("<workflow %s>", s.wdl)
 }
-
-var SubmissionChannel chan *WorkflowContext
-var WorkflowMaxRunTime = time.Second * 30
-
-var submissionChannelMutex sync.Mutex
-var dispatcherWaitGroup sync.WaitGroup
-var dispatcherAbortChannel chan bool
-var isDispatcherAlive = false
 
 func HttpEndpoint(w http.ResponseWriter, r *http.Request) {
 	fp, _, err := r.FormFile("wdl")
@@ -103,7 +106,7 @@ func HttpEndpoint(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	select {
-	case SubmissionChannel <- ctx:
+	case workflowSubmissionChannel <- ctx:
 	case <-time.After(time.Millisecond * 500):
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusRequestTimeout)
@@ -112,7 +115,7 @@ func HttpEndpoint(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func subprocess(cmd *exec.Cmd, name string, done chan<- string, subprocessAbort <-chan bool, wg *sync.WaitGroup) {
+func runJob(cmd *exec.Cmd, name string, done chan<- string, jobAbort <-chan bool, wg *sync.WaitGroup) {
 	var cmdDone = make(chan bool, 1)
 	defer wg.Done()
 
@@ -141,7 +144,7 @@ func subprocess(cmd *exec.Cmd, name string, done chan<- string, subprocessAbort 
 			fmt.Printf("subprocess: finish with: %s\n", status)
 			done <- fmt.Sprintf("%s:%s", name, status)
 			return
-		case _, ok := <-subprocessAbort:
+		case _, ok := <-jobAbort:
 			if !ok {
 				//fmt.Printf("subprocess: abort signal received\n")
 				return
@@ -150,31 +153,31 @@ func subprocess(cmd *exec.Cmd, name string, done chan<- string, subprocessAbort 
 	}
 }
 
-func workflowWorker(context *WorkflowContext, done chan<- *WorkflowContext, abortChannel <-chan bool) {
+func (wd *WorkflowDispatcher) runWorkflow(context *WorkflowContext, workflowResultsChannel chan<- *WorkflowContext, workflowAbortChannel <-chan bool) {
 	fmt.Printf("workflow %s: start\n", context.uuid)
 	<-DbSetStatusAsync(context, "Started")
 	context.status = "Started"
 
-	var subprocessDone = make(chan string)
+	var jobDone = make(chan string)
+	var jobAbort = make(map[string]chan bool)
+	var jobWaitGroup sync.WaitGroup
 	var workflowDone = make(chan bool)
-	var subprocessAbort = make(map[string]chan bool)
-	var subprocessWaitGroup sync.WaitGroup
+	var workflowTimeout = time.After(wd.workflowMaxRuntime)
 	var call_status = make(map[string]string)
 	var calls = make(chan string, 20)
-	var timeout = time.After(WorkflowMaxRunTime)
 
 	defer func() {
 		context.done <- context
 		close(context.done)
-		done <- context
-		subprocessWaitGroup.Wait()
+		workflowResultsChannel <- context
+		jobWaitGroup.Wait()
 	}()
 
 	var abortSubprocesses = func() {
-		for _, v := range subprocessAbort {
+		for _, v := range jobAbort {
 			close(v)
 		}
-		subprocessWaitGroup.Wait()
+		jobWaitGroup.Wait()
 		<-DbSetStatusAsync(context, "Aborted")
 		context.status = "Aborted"
 	}
@@ -209,25 +212,25 @@ func workflowWorker(context *WorkflowContext, done chan<- *WorkflowContext, abor
 
 	for {
 		select {
-		case <-timeout:
-			fmt.Printf("workflow %s: done (timeout %s)\n", context.uuid, WorkflowMaxRunTime)
+		case <-workflowTimeout:
+			fmt.Printf("workflow %s: done (timeout %s)\n", context.uuid, wd.workflowMaxRuntime)
 			abortSubprocesses()
 			return
 		case call := <-calls:
 			fmt.Printf("workflow %s: launching call: %s\n", context.uuid, call)
-			subprocessAbort[call] = make(chan bool, 1)
-			subprocessWaitGroup.Add(1)
-			go subprocess(exec.Command("sleep", "2"), call, subprocessDone, subprocessAbort[call], &subprocessWaitGroup)
+			jobAbort[call] = make(chan bool, 1)
+			jobWaitGroup.Add(1)
+			go runJob(exec.Command("sleep", "2"), call, jobDone, jobAbort[call], &jobWaitGroup)
 		case <-workflowDone:
 			context.status = "Done"
 			<-DbSetStatusAsync(context, "Done")
 			return
-		case status := <-subprocessDone:
+		case status := <-jobDone:
 			fmt.Printf("workflow %s: subprocess finished: %s\n", context.uuid, status)
 			var split = strings.Split(status, ":")
 			var call = split[0]
 			doneCalls <- call
-		case _, ok := <-abortChannel:
+		case _, ok := <-workflowAbortChannel:
 			if !ok {
 				fmt.Printf("workflow %s: aborting...\n", context.uuid)
 				abortSubprocesses()
@@ -237,35 +240,24 @@ func workflowWorker(context *WorkflowContext, done chan<- *WorkflowContext, abor
 	}
 }
 
-func workflowDispatcher(max, buffer int) {
-	submissionChannelMutex.Lock()
-	if isDispatcherAlive {
-		submissionChannelMutex.Unlock()
-		return
-	}
-	SubmissionChannel = make(chan *WorkflowContext, buffer)
-	dispatcherAbortChannel = make(chan bool)
-	dispatcherWaitGroup.Add(1)
-	isDispatcherAlive = true
-	submissionChannelMutex.Unlock()
-
+func dispatcher(config *WorkflowDispatcher) {
 	var workers = 0
 	var isAborting = false
-	var done = make(chan *WorkflowContext)
+	var workflowDone = make(chan *WorkflowContext)
 	var workflowAbort = make(map[string]chan bool)
 	var runningWorkflows = make(map[string]*WorkflowContext)
 
 	fmt.Printf("dispatcher: enter\n")
 	defer func() {
-		dispatcherWaitGroup.Done()
+		config.waitGroup.Done()
 		fmt.Printf("dispatcher: exit\n")
 	}()
 
-	var abortWorkflows = func() {
-		submissionChannelMutex.Lock()
-		close(SubmissionChannel)
-		isDispatcherAlive = false
-		submissionChannelMutex.Unlock()
+	var abort = func() {
+		config.submitChannelMutex.Lock()
+		close(config.submitChannel)
+		config.isAlive = false
+		config.submitChannelMutex.Unlock()
 
 		isAborting = true
 		for _, v := range workflowAbort {
@@ -283,76 +275,96 @@ func workflowDispatcher(max, buffer int) {
 	for {
 		if isAborting {
 			select {
-			case d := <-done:
+			case d := <-workflowDone:
 				processDone(d)
 				if len(runningWorkflows) == 0 {
 					return
 				}
 			}
-		} else if workers < max {
+		} else if workers < config.maxWorkers {
 			select {
-			case wfContext := <-SubmissionChannel:
+			case wfContext := <-config.submitChannel:
 				// wf can be a new workflow, or a workflow in progress (restart)
 				workers++
 				runningWorkflows[fmt.Sprintf("%s", wfContext.uuid)] = wfContext
-				abortChannel := make(chan bool, 1)
-				workflowAbort[fmt.Sprintf("%s", wfContext.uuid)] = abortChannel
-				go workflowWorker(wfContext, done, abortChannel)
-			case d := <-done:
+				workflowAbortChannel := make(chan bool, 1)
+				workflowAbort[fmt.Sprintf("%s", wfContext.uuid)] = workflowAbortChannel
+				go runWorkflow(wfContext, workflowDone, workflowAbortChannel)
+			case d := <-workflowDone:
 				processDone(d)
-			case _, ok := <-dispatcherAbortChannel:
+			case _, ok := <-config.abortChannel:
 				if !ok {
-					abortWorkflows()
+					abort()
 				}
 			}
 		} else {
 			select {
-			case d := <-done:
+			case d := <-workflowDone:
 				processDone(d)
-			case _, ok := <-dispatcherAbortChannel:
+			case _, ok := <-config.abortChannel:
 				if !ok {
-					abortWorkflows()
+					abort()
 				}
 			}
 		}
 	}
 }
 
-func StartDispatcher(workers int, buffer int) {
-	go workflowDispatcher(workers, buffer)
+func NewDispatcher(workers int, buffer int) *WorkflowDispatcher {
+	var waitGroup sync.WaitGroup
+	var mutex sync.Mutex
+
+	mutex.Lock()
+	defer mutex.Unlock()
+
+	config := WorkflowDispatcher{
+		true,
+		workers,
+		make(chan *WorkflowContext, buffer),
+		&mutex,
+		make(chan bool),
+		&waitGroup,
+		time.Second * 30}
+	go dispatcher(&config)
+	return &config
 }
 
-func AbortDispatcher() {
-	close(dispatcherAbortChannel)
-	dispatcherWaitGroup.Wait()
+func (wd *WorkflowDispatcher) AbortDispatcher() {
+	close(wd.abortChannel)
+	wd.Wait()
 }
 
-func WaitForDispatcherToExit() {
-	dispatcherWaitGroup.Wait()
+func (wd *WorkflowDispatcher) Wait() {
+	wd.waitGroup.Wait()
 }
 
-func IsAlive() bool {
-	submissionChannelMutex.Lock()
-	defer submissionChannelMutex.Unlock()
-	return isDispatcherAlive
+func (wd *WorkflowDispatcher) IsAlive() bool {
+	wd.submitChannelMutex.Lock()
+	defer wd.submitChannelMutex.Unlock()
+	return wd.isAlive
 }
 
-func SubmitWorkflow(wdl, inputs, options string, id uuid.UUID) *WorkflowContext {
+func (wd *WorkflowDispatcher) SubmitWorkflow(wdl, inputs, options string, id uuid.UUID) *WorkflowContext {
 	sources := WorkflowSources{strings.TrimSpace(wdl), strings.TrimSpace(inputs), strings.TrimSpace(options)}
 	uuid := uuid.NewV4()
 	ctx := <-DbNewWorkflowAsync(uuid, &sources)
-	submissionChannelMutex.Lock()
-	defer submissionChannelMutex.Unlock()
-	if isDispatcherAlive == true {
-		SubmissionChannel <- ctx
-	} else {
-		return nil
-	}
+	wd.SubmitExistingWorkflow(ctx)
 	return ctx
 }
 
-func RunWorkflow(wdl, inputs, options string, id uuid.UUID) *WorkflowContext {
-	ctx := SubmitWorkflow(wdl, inputs, options, id)
+func (wd *WorkflowDispatcher) SubmitExistingWorkflow(ctx *WorkflowContext) error {
+	wd.submitChannelMutex.Lock()
+	defer wd.submitChannelMutex.Unlock()
+	if wd.isAlive == true {
+		wd.submitChannel <- ctx
+	} else {
+		return errors.New("workflow submission is closed")
+	}
+	return nil
+}
+
+func (wd *WorkflowDispatcher) RunWorkflow(wdl, inputs, options string, id uuid.UUID) *WorkflowContext {
+	ctx := wd.SubmitWorkflow(wdl, inputs, options, id)
 	if ctx == nil {
 		return nil
 	}
@@ -362,26 +374,26 @@ func RunWorkflow(wdl, inputs, options string, id uuid.UUID) *WorkflowContext {
 	return result
 }
 
-func AbortWorkflow(id uuid.UUID) {
+func (wd *WorkflowDispatcher) AbortWorkflow(id uuid.UUID) {
 	return
 }
 
-func SignalHandler() {
+func SignalHandler(wd *WorkflowDispatcher) {
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		sig := <-sigs
 		fmt.Printf("%s signal detected... aborting dispatcher\n", sig)
-		AbortDispatcher()
+		wd.AbortDispatcher()
 		fmt.Printf("%s signal detected... aborted dispatcher\n", sig)
 		os.Exit(130)
 	}()
 }
 
 func main() {
-	StartDispatcher(1000, 4000)
+	wd := NewDispatcher(1000, 4000)
 	StartDbDispatcher()
-	SignalHandler()
+	SignalHandler(wd)
 
 	/*go func() {
 		fmt.Println("Listening on :8000 ...")
@@ -401,7 +413,7 @@ func main() {
 			fmt.Printf("restarting %s %d\n", restartableWfContext, len(restartableWorkflows))
 			restartWg.Add(1)
 			go func(ctx *WorkflowContext) {
-				SubmissionChannel <- ctx
+				wd.SubmitWorkflow(ctx)
 				<-ctx.done
 				restartWg.Done()
 			}(restartableWfContext)
@@ -422,12 +434,11 @@ func main() {
 				RunWorkflow("wdl", "inputs", "options", uuid.NewV4())
 				wg.Done()
 			}()
-			time.Sleep(time.Millisecond * 10)
 		}
 		wg.Wait()
 	}
 
 	if isDispatcherAlive == false {
-		WaitForDispatcherToExit()
+		Wait()
 	}
 }

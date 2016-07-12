@@ -25,7 +25,7 @@ func f(id string, ctx context.Context) {
 	}
 }
 
-func main() {
+func main2() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go f("A", ctx)
