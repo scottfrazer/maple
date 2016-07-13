@@ -118,6 +118,13 @@ func SubmitHttpEndpoint(wd *WorkflowDispatcher) http.HandlerFunc {
 	}
 }
 
+func GetHttpEndpoint(wd *WorkflowDispatcher) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		io.WriteString(w, "this is a message")
+	}
+}
+
 func (wd *WorkflowDispatcher) runJob(cmd *exec.Cmd, name string, done chan<- string, jobAbort <-chan bool, wg *sync.WaitGroup) {
 	var cmdDone = make(chan bool, 1)
 	var log = wd.log
@@ -410,19 +417,20 @@ func main() {
 	StartDbDispatcher()
 	SignalHandler(wd)
 
-	/*go func() {
-		fmt.Println("Listening on :8000 ...")
-		http.HandleFunc("/submit", HttpEndpoint)
-		http.ListenAndServe(":8000", nil)
-	}()*/
-
 	if len(os.Args) < 2 {
 		fmt.Println("usage: %s <run|restart>")
 		os.Exit(1)
 	}
 
+	if os.Args[1] == "server" {
+		fmt.Println("Listening on :8000 ...")
+		http.HandleFunc("/submit", SubmitHttpEndpoint(wd))
+		http.HandleFunc("/get", GetHttpEndpoint(wd))
+		http.ListenAndServe(":8000", nil)
+	}
+
 	if os.Args[1] == "restart" {
-		restartableWorkflows := <-DbGetByStatusAsync("Aborted", "NotStarted")
+		restartableWorkflows := <-DbGetByStatusAsync("Aborted", "NotStarted", "Started")
 		var restartWg sync.WaitGroup
 		for _, restartableWfContext := range restartableWorkflows {
 			fmt.Printf("restarting %s\n", restartableWfContext.uuid)
@@ -450,8 +458,12 @@ func main() {
 				wg.Done()
 			}()
 		}
+		fmt.Println("================ wg.Wait() start")
 		wg.Wait()
+		fmt.Println("================ wg.Wait() end")
 	}
 
+	fmt.Println("================ wd.Abort() start")
 	wd.Abort()
+	fmt.Println("================ wd.Abort() end")
 }
