@@ -125,13 +125,19 @@ func GetHttpEndpoint(wd *WorkflowDispatcher) http.HandlerFunc {
 	}
 }
 
-func (wd *WorkflowDispatcher) runJob(cmd *exec.Cmd, name string, done chan<- string, jobAbort <-chan bool, wg *sync.WaitGroup) {
+func (wd *WorkflowDispatcher) runJob(cmd *exec.Cmd, name string, done chan<- string, jobAbort <-chan bool) {
 	var cmdDone = make(chan bool, 1)
 	var log = wd.log
-	defer wg.Done()
+	var isAborting = false
+	log.Info("runJob: start")
+	defer log.Info("runJob: done")
+	hack := make(chan int, 1)
 
 	go func() {
-		<-time.After(time.Second * 2)
+		select {
+		case <-time.After(time.Second * 2):
+		case <-hack:
+		}
 		//cmd.Run()
 		cmdDone <- true
 	}()
@@ -152,16 +158,19 @@ func (wd *WorkflowDispatcher) runJob(cmd *exec.Cmd, name string, done chan<- str
 			} else if !cmd.ProcessState.Success() {
 				status = "failed"
 			}*/
-			log.Info("subprocess: finish with: %s", status)
+			log.Info("runJob: finish with: %s", status)
 			done <- fmt.Sprintf("%s:%s", name, status)
+			log.Info("runJob: sent done message")
 			return
 		case _, ok := <-jobAbort:
-			if !ok {
-				//fmt.Printf("subprocess: abort signal received\n")
-				return
+			if !ok && !isAborting {
+				log.Info("runJob: abort")
+				hack <- 1
+				isAborting = true
 			}
 		}
 	}
+	log.Info("runJob: done2")
 }
 
 func (wd *WorkflowDispatcher) runWorkflow(context *WorkflowContext, workflowResultsChannel chan<- *WorkflowContext, workflowAbortChannel <-chan bool) {
@@ -173,27 +182,26 @@ func (wd *WorkflowDispatcher) runWorkflow(context *WorkflowContext, workflowResu
 
 	var jobDone = make(chan string)
 	var jobAbort = make(map[string]chan bool)
-	var jobWaitGroup sync.WaitGroup
+	var jobAbortMutex sync.Mutex
 	var workflowDone = make(chan bool)
 	var workflowTimeout = time.After(wd.workflowMaxRuntime)
 	var call_status = make(map[string]string)
 	var calls = make(chan string, 20)
+	var isAborting = false
 
 	defer func() {
 		context.done <- context
 		close(context.done)
 		workflowResultsChannel <- context
-		jobWaitGroup.Wait()
-		log.Info("runWorkflow: end")
 	}()
 
 	var abortSubprocesses = func() {
 		for _, v := range jobAbort {
 			close(v)
 		}
-		jobWaitGroup.Wait()
 		<-DbSetStatusAsync(context, "Aborted")
 		context.status = "Aborted"
+		isAborting = true
 	}
 
 	var doneCalls = make(chan string)
@@ -211,13 +219,26 @@ func (wd *WorkflowDispatcher) runWorkflow(context *WorkflowContext, workflowResu
 	go func() {
 		for call := range doneCalls {
 			call_status[call] = "Done"
-			if len(call_status) == 8 {
+
+			jobAbortMutex.Lock()
+			delete(jobAbort, call)
+			jobAbortMutex.Unlock()
+
+			if len(call_status) == 8 || (isAborting && len(jobAbort) == 0) {
 				workflowDone <- true
 				return
-			} else {
+			} else if !isAborting {
+				//newWork := false
 				for _, nextCall := range runnableDependents(call) {
 					calls <- nextCall
+					//newWork = true
 				}
+
+				/*log.Info("workflow: newWork=%t, len(jobAbort)=%d", newWork, len(jobAbort))
+				if !newWork && len(jobAbort) == 0 {
+					workflowDone <- true
+					return
+				}*/
 			}
 		}
 	}()
@@ -225,30 +246,55 @@ func (wd *WorkflowDispatcher) runWorkflow(context *WorkflowContext, workflowResu
 	doneCalls <- "workflow"
 
 	for {
-		select {
-		case <-workflowTimeout:
-			log.Info("workflow %s: done (timeout %s)", context.uuid, wd.workflowMaxRuntime)
-			abortSubprocesses()
-			return
-		case call := <-calls:
-			log.Info("workflow %s: launching call: %s", context.uuid, call)
-			jobAbort[call] = make(chan bool, 1)
-			jobWaitGroup.Add(1)
-			go wd.runJob(exec.Command("sleep", "2"), call, jobDone, jobAbort[call], &jobWaitGroup)
-		case <-workflowDone:
-			context.status = "Done"
-			<-DbSetStatusAsync(context, "Done")
-			return
-		case status := <-jobDone:
-			log.Info("workflow %s: subprocess finished: %s", context.uuid, status)
-			var split = strings.Split(status, ":")
-			var call = split[0]
-			doneCalls <- call
-		case _, ok := <-workflowAbortChannel:
-			if !ok {
-				log.Info("workflow %s: aborting...", context.uuid)
-				abortSubprocesses()
+		if isAborting {
+			log.Info("isAborting state... receiving message")
+			select {
+			case <-workflowDone:
+				log.Info("workflow: completed")
+				if context.status != "Aborted" {
+					context.status = "Done"
+					<-DbSetStatusAsync(context, "Done")
+				}
 				return
+			case status := <-jobDone:
+				log.Info("workflow: subprocess finished: %s", status)
+				var split = strings.Split(status, ":")
+				var call = split[0]
+				doneCalls <- call
+			}
+		} else {
+			select {
+			case <-workflowTimeout:
+				log.Info("workflow: done (timeout %s)", wd.workflowMaxRuntime)
+				abortSubprocesses()
+			case call := <-calls:
+				log.Info("workflow: launching call: %s", call)
+				jobAbortMutex.Lock()
+				jobAbort[call] = make(chan bool, 1)
+				go wd.runJob(exec.Command("sleep", "2"), call, jobDone, jobAbort[call])
+				jobAbortMutex.Unlock()
+			case <-workflowDone:
+				log.Info("workflow: completed")
+				context.status = "Done"
+				<-DbSetStatusAsync(context, "Done")
+				return
+			case status := <-jobDone:
+				log.Info("workflow: subprocess finished: %s", status)
+				var split = strings.Split(status, ":")
+				var call = split[0]
+				doneCalls <- call
+			case _, ok := <-workflowAbortChannel:
+				if !ok {
+					log.Info("workflow: aborting...")
+					abortSubprocesses()
+
+					jobAbortMutex.Lock()
+					if len(jobAbort) == 0 {
+						jobAbortMutex.Unlock()
+						return
+					}
+					jobAbortMutex.Unlock()
+				}
 			}
 		}
 	}
@@ -326,7 +372,7 @@ func (wd *WorkflowDispatcher) runDispatcher() {
 	}
 }
 
-func NewDispatcher(workers int, buffer int) *WorkflowDispatcher {
+func NewWorkflowDispatcher(workers int, buffer int, log *Logger) *WorkflowDispatcher {
 	var waitGroup sync.WaitGroup
 	var mutex sync.Mutex
 
@@ -341,7 +387,7 @@ func NewDispatcher(workers int, buffer int) *WorkflowDispatcher {
 		make(chan bool),
 		&waitGroup,
 		time.Second * 30,
-		GlobalLogger}
+		log}
 
 	waitGroup.Add(1)
 	go wd.runDispatcher()
@@ -413,7 +459,8 @@ func SignalHandler(wd *WorkflowDispatcher) {
 }
 
 func main() {
-	wd := NewDispatcher(5000, 5000)
+	log := NewLogger("my.log")
+	wd := NewWorkflowDispatcher(5000, 5000, log)
 	StartDbDispatcher()
 	SignalHandler(wd)
 
@@ -423,7 +470,7 @@ func main() {
 	}
 
 	if os.Args[1] == "server" {
-		fmt.Println("Listening on :8000 ...")
+		log.Info("Listening on :8000 ...")
 		http.HandleFunc("/submit", SubmitHttpEndpoint(wd))
 		http.HandleFunc("/get", GetHttpEndpoint(wd))
 		http.ListenAndServe(":8000", nil)
@@ -458,12 +505,8 @@ func main() {
 				wg.Done()
 			}()
 		}
-		fmt.Println("================ wg.Wait() start")
 		wg.Wait()
-		fmt.Println("================ wg.Wait() end")
 	}
 
-	fmt.Println("================ wd.Abort() start")
 	wd.Abort()
-	fmt.Println("================ wd.Abort() end")
 }

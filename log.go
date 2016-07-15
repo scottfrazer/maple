@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"github.com/satori/go.uuid"
 	"io"
@@ -15,6 +16,12 @@ type Logger struct {
 	prefix string
 	writer io.Writer
 	mutex  *sync.Mutex
+}
+
+func NewByteBufferLogger(buf *bytes.Buffer) *Logger {
+	var mutex sync.Mutex
+	log := &Logger{"", buf, &mutex}
+	return log
 }
 
 func NewLogger(path string) *Logger {
@@ -37,5 +44,6 @@ func (log *Logger) ForWorkflow(uuid uuid.UUID) *Logger {
 func (log *Logger) Info(format string, args ...interface{}) {
 	log.mutex.Lock()
 	defer log.mutex.Unlock()
-	fmt.Fprintf(log.writer, time.Now().Format("2006-01-02 15:04:05.999")+" "+log.prefix+fmt.Sprintf(format, args...)+"\n")
+	now := time.Now().Format("2006-01-02 15:04:05.999")
+	fmt.Fprintf(log.writer, now+" "+log.prefix+fmt.Sprintf(format, args...)+"\n")
 }
