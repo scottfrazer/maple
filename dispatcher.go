@@ -96,7 +96,7 @@ func SubmitHttpEndpoint(wd *WorkflowDispatcher) http.HandlerFunc {
 
 		sources := WorkflowSources{strings.TrimSpace(wdl), strings.TrimSpace(inputs), strings.TrimSpace(options)}
 		uuid := uuid.NewV4()
-		ctx := <-DbNewWorkflowAsync(uuid, &sources)
+		ctx := <-DbNewWorkflowAsync(uuid, &sources, wd.log)
 
 		fmt.Printf("HTTP endpoint /submit/ received: %s\n", sources)
 		defer func() {
@@ -129,8 +129,8 @@ func (wd *WorkflowDispatcher) runJob(cmd *exec.Cmd, name string, done chan<- str
 	var cmdDone = make(chan bool, 1)
 	var log = wd.log
 	var isAborting = false
-	log.Info("runJob: start")
-	defer log.Info("runJob: done")
+	log.Info("runJob: start %s", name)
+	defer log.Info("runJob: done %s", name)
 	hack := make(chan int, 1)
 
 	go func() {
@@ -160,7 +160,6 @@ func (wd *WorkflowDispatcher) runJob(cmd *exec.Cmd, name string, done chan<- str
 			}*/
 			log.Info("runJob: finish with: %s", status)
 			done <- fmt.Sprintf("%s:%s", name, status)
-			log.Info("runJob: sent done message")
 			return
 		case _, ok := <-jobAbort:
 			if !ok && !isAborting {
@@ -170,14 +169,13 @@ func (wd *WorkflowDispatcher) runJob(cmd *exec.Cmd, name string, done chan<- str
 			}
 		}
 	}
-	log.Info("runJob: done2")
 }
 
 func (wd *WorkflowDispatcher) runWorkflow(context *WorkflowContext, workflowResultsChannel chan<- *WorkflowContext, workflowAbortChannel <-chan bool) {
 	var log = wd.log.ForWorkflow(context.uuid)
 
 	log.Info("runWorkflow: start")
-	<-DbSetStatusAsync(context, "Started")
+	<-DbSetStatusAsync(context, "Started", log)
 	context.status = "Started"
 
 	var jobDone = make(chan string)
@@ -199,7 +197,7 @@ func (wd *WorkflowDispatcher) runWorkflow(context *WorkflowContext, workflowResu
 		for _, v := range jobAbort {
 			close(v)
 		}
-		<-DbSetStatusAsync(context, "Aborted")
+		<-DbSetStatusAsync(context, "Aborted", log)
 		context.status = "Aborted"
 		isAborting = true
 	}
@@ -253,7 +251,7 @@ func (wd *WorkflowDispatcher) runWorkflow(context *WorkflowContext, workflowResu
 				log.Info("workflow: completed")
 				if context.status != "Aborted" {
 					context.status = "Done"
-					<-DbSetStatusAsync(context, "Done")
+					<-DbSetStatusAsync(context, "Done", log)
 				}
 				return
 			case status := <-jobDone:
@@ -276,7 +274,7 @@ func (wd *WorkflowDispatcher) runWorkflow(context *WorkflowContext, workflowResu
 			case <-workflowDone:
 				log.Info("workflow: completed")
 				context.status = "Done"
-				<-DbSetStatusAsync(context, "Done")
+				<-DbSetStatusAsync(context, "Done", log)
 				return
 			case status := <-jobDone:
 				log.Info("workflow: subprocess finished: %s", status)
@@ -415,7 +413,7 @@ func (wd *WorkflowDispatcher) IsAlive() bool {
 func (wd *WorkflowDispatcher) SubmitWorkflow(wdl, inputs, options string, id uuid.UUID) *WorkflowContext {
 	sources := WorkflowSources{strings.TrimSpace(wdl), strings.TrimSpace(inputs), strings.TrimSpace(options)}
 	uuid := uuid.NewV4()
-	ctx := <-DbNewWorkflowAsync(uuid, &sources)
+	ctx := <-DbNewWorkflowAsync(uuid, &sources, wd.log)
 	wd.SubmitExistingWorkflow(ctx)
 	return ctx
 }
@@ -437,7 +435,7 @@ func (wd *WorkflowDispatcher) RunWorkflow(wdl, inputs, options string, id uuid.U
 		return nil
 	}
 	result := <-ctx.done
-	wfStatus := <-DbGetStatusAsync(ctx)
+	wfStatus := <-DbGetStatusAsync(ctx, wd.log)
 	wd.log.Info("--- Workflow Completed: %s (status %s)", id, wfStatus)
 	return result
 }
@@ -461,7 +459,7 @@ func SignalHandler(wd *WorkflowDispatcher) {
 func main() {
 	log := NewLogger("my.log")
 	wd := NewWorkflowDispatcher(5000, 5000, log)
-	StartDbDispatcher()
+	StartDbDispatcher(log)
 	SignalHandler(wd)
 
 	if len(os.Args) < 2 {
@@ -477,7 +475,7 @@ func main() {
 	}
 
 	if os.Args[1] == "restart" {
-		restartableWorkflows := <-DbGetByStatusAsync("Aborted", "NotStarted", "Started")
+		restartableWorkflows := <-DbGetByStatusAsync(log, "Aborted", "NotStarted", "Started")
 		var restartWg sync.WaitGroup
 		for _, restartableWfContext := range restartableWorkflows {
 			fmt.Printf("restarting %s\n", restartableWfContext.uuid)
