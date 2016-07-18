@@ -456,6 +456,22 @@ func (engine *Engine) RunWorkflow(wdl, inputs, options string, id uuid.UUID) *Wo
 	return result
 }
 
+func (engine *Engine) SubmitWorkflow(wdl, inputs, options string, id uuid.UUID) *WorkflowContext {
+
+}
+
+func (engine *Engine) AbortWorkflow(uuid uuid.UUID) {
+
+}
+
+func (engine *Engine) ListWorkflows() {
+
+}
+
+func (engine *Engine) Shutdown() {
+
+}
+
 func main() {
 
 	var (
