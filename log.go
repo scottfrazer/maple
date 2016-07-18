@@ -1,44 +1,45 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
 	"github.com/satori/go.uuid"
 	"io"
+	"io/ioutil"
 	"os"
 	"sync"
 	"time"
 )
 
-var GlobalLogger = NewLogger("my.log")
-
 type Logger struct {
-	prefix string
-	writer io.Writer
-	mutex  *sync.Mutex
+	prefix       string
+	writer       io.Writer
+	mutex        *sync.Mutex
+	wfLogsPath   string
+	callLogsPath string
 }
 
-func NewByteBufferLogger(buf *bytes.Buffer) *Logger {
+func NewLogger() *Logger {
 	var mutex sync.Mutex
-	log := &Logger{"", buf, &mutex}
-	return log
+	return &Logger{"", ioutil.Discard, &mutex, "", ""}
 }
 
-func NewLogger(path string) *Logger {
+func (log *Logger) ToFile(path string) *Logger {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to open log file %s: %s", path, err))
 	}
+	log.writer = io.MultiWriter(log.writer, file)
+	return log
+}
 
-	multi := io.MultiWriter(file, os.Stdout)
-	var mutex sync.Mutex
-	log := &Logger{"", multi, &mutex}
+func (log *Logger) ToWriter(writer io.Writer) *Logger {
+	log.writer = io.MultiWriter(log.writer, writer)
 	return log
 }
 
 func (log *Logger) ForWorkflow(uuid uuid.UUID) *Logger {
 	prefix := fmt.Sprintf("[%s] ", uuid.String()[:8])
-	return &Logger{prefix, log.writer, log.mutex}
+	return &Logger{prefix, log.writer, log.mutex, log.wfLogsPath, log.callLogsPath}
 }
 
 func (log *Logger) Info(format string, args ...interface{}) {

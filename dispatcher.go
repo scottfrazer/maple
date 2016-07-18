@@ -4,13 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"github.com/satori/go.uuid"
+	"gopkg.in/alecthomas/kingpin.v2"
 	"io"
 	"io/ioutil"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -24,6 +24,7 @@ type WorkflowDispatcher struct {
 	submitChannelMutex *sync.Mutex
 	abortChannel       chan bool
 	waitGroup          *sync.WaitGroup
+	db                 *DatabaseDispatcher
 	workflowMaxRuntime time.Duration
 	log                *Logger
 }
@@ -96,7 +97,7 @@ func SubmitHttpEndpoint(wd *WorkflowDispatcher) http.HandlerFunc {
 
 		sources := WorkflowSources{strings.TrimSpace(wdl), strings.TrimSpace(inputs), strings.TrimSpace(options)}
 		uuid := uuid.NewV4()
-		ctx := <-DbNewWorkflowAsync(uuid, &sources, wd.log)
+		ctx := wd.db.NewWorkflow(uuid, &sources, wd.log)
 
 		fmt.Printf("HTTP endpoint /submit/ received: %s\n", sources)
 		defer func() {
@@ -115,13 +116,6 @@ func SubmitHttpEndpoint(wd *WorkflowDispatcher) http.HandlerFunc {
 			io.WriteString(w, `{"message": "timeout submitting workflow (500ms)"}`)
 			return
 		}
-	}
-}
-
-func GetHttpEndpoint(wd *WorkflowDispatcher) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		io.WriteString(w, "this is a message")
 	}
 }
 
@@ -175,7 +169,7 @@ func (wd *WorkflowDispatcher) runWorkflow(context *WorkflowContext, workflowResu
 	var log = wd.log.ForWorkflow(context.uuid)
 
 	log.Info("runWorkflow: start")
-	<-DbSetStatusAsync(context, "Started", log)
+	wd.db.SetWorkflowStatus(context, "Started", log)
 	context.status = "Started"
 
 	var jobDone = make(chan string)
@@ -197,7 +191,7 @@ func (wd *WorkflowDispatcher) runWorkflow(context *WorkflowContext, workflowResu
 		for _, v := range jobAbort {
 			close(v)
 		}
-		<-DbSetStatusAsync(context, "Aborted", log)
+		wd.db.SetWorkflowStatus(context, "Aborted", log)
 		context.status = "Aborted"
 		isAborting = true
 	}
@@ -226,17 +220,9 @@ func (wd *WorkflowDispatcher) runWorkflow(context *WorkflowContext, workflowResu
 				workflowDone <- true
 				return
 			} else if !isAborting {
-				//newWork := false
 				for _, nextCall := range runnableDependents(call) {
 					calls <- nextCall
-					//newWork = true
 				}
-
-				/*log.Info("workflow: newWork=%t, len(jobAbort)=%d", newWork, len(jobAbort))
-				if !newWork && len(jobAbort) == 0 {
-					workflowDone <- true
-					return
-				}*/
 			}
 		}
 	}()
@@ -251,7 +237,7 @@ func (wd *WorkflowDispatcher) runWorkflow(context *WorkflowContext, workflowResu
 				log.Info("workflow: completed")
 				if context.status != "Aborted" {
 					context.status = "Done"
-					<-DbSetStatusAsync(context, "Done", log)
+					wd.db.SetWorkflowStatus(context, "Done", log)
 				}
 				return
 			case status := <-jobDone:
@@ -274,7 +260,7 @@ func (wd *WorkflowDispatcher) runWorkflow(context *WorkflowContext, workflowResu
 			case <-workflowDone:
 				log.Info("workflow: completed")
 				context.status = "Done"
-				<-DbSetStatusAsync(context, "Done", log)
+				wd.db.SetWorkflowStatus(context, "Done", log)
 				return
 			case status := <-jobDone:
 				log.Info("workflow: subprocess finished: %s", status)
@@ -370,7 +356,7 @@ func (wd *WorkflowDispatcher) runDispatcher() {
 	}
 }
 
-func NewWorkflowDispatcher(workers int, buffer int, log *Logger) *WorkflowDispatcher {
+func NewWorkflowDispatcher(workers int, buffer int, log *Logger, db *DatabaseDispatcher) *WorkflowDispatcher {
 	var waitGroup sync.WaitGroup
 	var mutex sync.Mutex
 
@@ -384,6 +370,7 @@ func NewWorkflowDispatcher(workers int, buffer int, log *Logger) *WorkflowDispat
 		&mutex,
 		make(chan bool),
 		&waitGroup,
+		db,
 		time.Second * 30,
 		log}
 
@@ -413,7 +400,7 @@ func (wd *WorkflowDispatcher) IsAlive() bool {
 func (wd *WorkflowDispatcher) SubmitWorkflow(wdl, inputs, options string, id uuid.UUID) *WorkflowContext {
 	sources := WorkflowSources{strings.TrimSpace(wdl), strings.TrimSpace(inputs), strings.TrimSpace(options)}
 	uuid := uuid.NewV4()
-	ctx := <-DbNewWorkflowAsync(uuid, &sources, wd.log)
+	ctx := wd.db.NewWorkflow(uuid, &sources, wd.log)
 	wd.SubmitExistingWorkflow(ctx)
 	return ctx
 }
@@ -427,17 +414,6 @@ func (wd *WorkflowDispatcher) SubmitExistingWorkflow(ctx *WorkflowContext) error
 		return errors.New("workflow submission is closed")
 	}
 	return nil
-}
-
-func (wd *WorkflowDispatcher) RunWorkflow(wdl, inputs, options string, id uuid.UUID) *WorkflowContext {
-	ctx := wd.SubmitWorkflow(wdl, inputs, options, id)
-	if ctx == nil {
-		return nil
-	}
-	result := <-ctx.done
-	wfStatus := <-DbGetStatusAsync(ctx, wd.log)
-	wd.log.Info("--- Workflow Completed: %s (status %s)", id, wfStatus)
-	return result
 }
 
 func (wd *WorkflowDispatcher) AbortWorkflow(id uuid.UUID) {
@@ -456,55 +432,75 @@ func SignalHandler(wd *WorkflowDispatcher) {
 	}(wd)
 }
 
-func main() {
-	log := NewLogger("my.log")
-	wd := NewWorkflowDispatcher(5000, 5000, log)
-	StartDbDispatcher(log)
+type Engine struct {
+	wd  *WorkflowDispatcher
+	log *Logger
+	db  *DatabaseDispatcher
+}
+
+func NewEngine(log *Logger, concurrentWorkflows int, submitQueueSize int) *Engine {
+	db := NewDatabaseDispatcher("sqlite3", "DB", log)
+	wd := NewWorkflowDispatcher(concurrentWorkflows, submitQueueSize, log, db)
 	SignalHandler(wd)
+	return &Engine{wd, log, db}
+}
 
-	if len(os.Args) < 2 {
-		fmt.Println("usage: %s <run|restart>")
-		os.Exit(1)
+func (engine *Engine) RunWorkflow(wdl, inputs, options string, id uuid.UUID) *WorkflowContext {
+	ctx := engine.wd.SubmitWorkflow(wdl, inputs, options, id)
+	if ctx == nil {
+		return nil
 	}
+	result := <-ctx.done
+	wfStatus := engine.db.GetWorkflowStatus(ctx, engine.log)
+	engine.log.Info("--- Workflow Completed: %s (status %s)", id, wfStatus)
+	return result
+}
 
-	if os.Args[1] == "server" {
-		log.Info("Listening on :8000 ...")
-		http.HandleFunc("/submit", SubmitHttpEndpoint(wd))
-		http.HandleFunc("/get", GetHttpEndpoint(wd))
-		http.ListenAndServe(":8000", nil)
-	}
+func main() {
 
-	if os.Args[1] == "restart" {
-		restartableWorkflows := <-DbGetByStatusAsync(log, "Aborted", "NotStarted", "Started")
+	var (
+		app          = kingpin.New("myapp", "A workflow engine")
+		queueSize    = app.Flag("queue-size", "Submission queue size").Default("1000").Int()
+		concurrentWf = app.Flag("concurrent-workflows", "Number of workflows").Default("1000").Int()
+		restart      = app.Command("restart", "Restart workflows")
+		run          = app.Command("run", "Run workflows")
+		runN         = run.Arg("count", "Number of workflows").Required().Int()
+		server       = app.Command("server", "Start HTTP server")
+	)
+
+	args, err := app.Parse(os.Args[1:])
+	log := NewLogger().ToFile("myapp.log").ToWriter(os.Stdout)
+	engine := NewEngine(log, *concurrentWf, *queueSize)
+
+	switch kingpin.MustParse(args, err) {
+	case restart.FullCommand():
+		restartableWorkflows := engine.db.GetWorkflowsByStatus(log, "Aborted", "NotStarted", "Started")
 		var restartWg sync.WaitGroup
 		for _, restartableWfContext := range restartableWorkflows {
 			fmt.Printf("restarting %s\n", restartableWfContext.uuid)
 			restartWg.Add(1)
 			go func(ctx *WorkflowContext) {
-				wd.SubmitExistingWorkflow(ctx)
+				engine.wd.SubmitExistingWorkflow(ctx)
 				<-ctx.done
 				restartWg.Done()
 			}(restartableWfContext)
 		}
 		restartWg.Wait()
-	}
-
-	if os.Args[1] == "run" {
-		if len(os.Args) < 3 {
-			fmt.Printf("usage: %s run <job_count>\n", os.Args[0])
-			os.Exit(1)
-		}
+	case run.FullCommand():
 		var wg sync.WaitGroup
-		var jobCount, _ = strconv.ParseInt(os.Args[2], 10, 64)
-		for i := int64(0); i < jobCount; i++ {
+		for i := 0; i < *runN; i++ {
 			wg.Add(1)
 			go func() {
-				wd.RunWorkflow("wdl", "inputs", "options", uuid.NewV4())
+				engine.RunWorkflow("wdl", "inputs", "options", uuid.NewV4())
 				wg.Done()
 			}()
 		}
 		wg.Wait()
+	case server.FullCommand():
+		log.Info("Listening on :8000 ...")
+		http.HandleFunc("/submit", SubmitHttpEndpoint(engine.wd))
+		http.ListenAndServe(":8000", nil)
 	}
 
-	wd.Abort()
+	engine.wd.Abort()
 }
