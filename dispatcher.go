@@ -457,19 +457,18 @@ func (engine *Engine) RunWorkflow(wdl, inputs, options string, id uuid.UUID) *Wo
 }
 
 func (engine *Engine) SubmitWorkflow(wdl, inputs, options string, id uuid.UUID) *WorkflowContext {
-
+	return nil
 }
 
-func (engine *Engine) AbortWorkflow(uuid uuid.UUID) {
-
+func (engine *Engine) AbortWorkflow(uuid uuid.UUID) error {
+	return nil
 }
 
-func (engine *Engine) ListWorkflows() {
-
+func (engine *Engine) ListWorkflows() []uuid.UUID {
+	return nil
 }
 
 func (engine *Engine) Shutdown() {
-
 }
 
 func main() {

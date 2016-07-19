@@ -34,9 +34,9 @@ func NewDatabaseDispatcher(driverName, dataSourceName string, log *Logger) *Data
 	return dbDispatcher
 }
 
-func (dispatcher *DatabaseDispatcher) Abort() {
-	close(dispatcher.abort)
-	dispatcher.wg.Wait()
+func (dsp *DatabaseDispatcher) Abort() {
+	close(dsp.abort)
+	dsp.wg.Wait()
 }
 
 func tables(log *Logger, db *sql.DB) []string {
@@ -163,7 +163,7 @@ func (dsp *DatabaseDispatcher) GetWorkflowsByStatus(log *Logger, status ...strin
 	return <-done
 }
 
-func (dsp *DatabaseDispatcher) newWorkflow(req *DbNewWorkflow) (*WorkflowContext, error) {
+func (dsp *DatabaseDispatcher) _NewWorkflow(req *DbNewWorkflow) (*WorkflowContext, error) {
 	db := dsp.db
 	log := req.log
 	var success = false
@@ -244,7 +244,7 @@ func (dsp *DatabaseDispatcher) newWorkflow(req *DbNewWorkflow) (*WorkflowContext
 	return &ctx, nil
 }
 
-func (dsp *DatabaseDispatcher) setWorkflowStatus(req *DbSetStatus) {
+func (dsp *DatabaseDispatcher) _SetWorkflowStatus(req *DbSetStatus) {
 	db := dsp.db
 	log := req.log
 	var nowISO8601 = time.Now().Format("2006-01-02 15:04:05.999")
@@ -254,7 +254,7 @@ func (dsp *DatabaseDispatcher) setWorkflowStatus(req *DbSetStatus) {
 	e(err)
 }
 
-func (dsp *DatabaseDispatcher) getWorkflowStatus(req *DbGetStatus) string {
+func (dsp *DatabaseDispatcher) _GetWorkflowStatus(req *DbGetStatus) string {
 	db := dsp.db
 	log := req.log
 	var query = `SELECT status FROM workflow_status WHERE workflow_id=? ORDER BY datetime(date) DESC, id DESC LIMIT 1`
@@ -266,7 +266,7 @@ func (dsp *DatabaseDispatcher) getWorkflowStatus(req *DbGetStatus) string {
 	return status
 }
 
-func (dsp *DatabaseDispatcher) getWorkflowsByStatus(req *DbGetByStatus) ([]*WorkflowContext, error) {
+func (dsp *DatabaseDispatcher) _GetWorkflowsByStatus(req *DbGetByStatus) ([]*WorkflowContext, error) {
 	db := dsp.db
 	log := req.log
 	questionMarks := make([]string, len(req.statuses))
@@ -292,7 +292,7 @@ func (dsp *DatabaseDispatcher) getWorkflowsByStatus(req *DbGetByStatus) ([]*Work
 		var id int64
 		err = rows.Scan(&id)
 		e(err)
-		context, err := dsp.dbLoadWorkflowFromPrimaryKey(log, id)
+		context, err := dsp._LoadWorkflowPK(log, id)
 		e(err)
 		contexts = append(contexts, context)
 	}
@@ -323,28 +323,28 @@ func (dispatcher *DatabaseDispatcher) start() {
 		case action := <-dispatcher.queue:
 			switch t := action.(type) {
 			case DbSetStatus:
-				dispatcher.setWorkflowStatus(&t)
+				dispatcher._SetWorkflowStatus(&t)
 				if t.done != nil {
 					*t.done <- true
 				}
 			case DbGetStatus:
-				t.done <- dispatcher.getWorkflowStatus(&t)
+				t.done <- dispatcher._GetWorkflowStatus(&t)
 			case DbGetByStatus:
-				uuids, err := dispatcher.getWorkflowsByStatus(&t)
+				uuids, err := dispatcher._GetWorkflowsByStatus(&t)
 				if err != nil {
-					dispatcher.log.Info("[db] getWorkflowsByStatus failed: %s", err)
+					dispatcher.log.Info("[db] _GetWorkflowsByStatus failed: %s", err)
 					continue
 				}
 				t.done <- uuids
 			case DbNewWorkflow:
-				ctx, err := dispatcher.newWorkflow(&t)
+				ctx, err := dispatcher._NewWorkflow(&t)
 				if err != nil {
-					dispatcher.log.Info("[db] newWorkflow failed: %s", err)
+					dispatcher.log.Info("[db] _NewWorkflow failed: %s", err)
 					continue
 				}
 				t.done <- ctx
 			case DbLoadWorkflow:
-				ctx, err := dispatcher.dbLoadWorkflowFromUUID(&t)
+				ctx, err := dispatcher._LoadWorkflowUUID(&t)
 				if err != nil {
 					dispatcher.log.Info("[db] dbLoadWorkflow failed: %s", err)
 					continue
@@ -357,7 +357,7 @@ func (dispatcher *DatabaseDispatcher) start() {
 	}
 }
 
-func (dsp *DatabaseDispatcher) dbLoadWorkflowFromUUID(req *DbLoadWorkflow) (*WorkflowContext, error) {
+func (dsp *DatabaseDispatcher) _LoadWorkflowUUID(req *DbLoadWorkflow) (*WorkflowContext, error) {
 	db := dsp.db
 	log := req.log
 	var context WorkflowContext
@@ -373,10 +373,10 @@ func (dsp *DatabaseDispatcher) dbLoadWorkflowFromUUID(req *DbLoadWorkflow) (*Wor
 		return nil, err
 	}
 
-	return dsp._dbLoadWorkflowFromPrimaryKey(log, &context, context.primaryKey)
+	return dsp._LoadWorkflowSources(log, &context, context.primaryKey)
 }
 
-func (dsp *DatabaseDispatcher) dbLoadWorkflowFromPrimaryKey(log *Logger, primaryKey int64) (*WorkflowContext, error) {
+func (dsp *DatabaseDispatcher) _LoadWorkflowPK(log *Logger, primaryKey int64) (*WorkflowContext, error) {
 	db := dsp.db
 	var context WorkflowContext
 	context.primaryKey = primaryKey
@@ -389,15 +389,15 @@ func (dsp *DatabaseDispatcher) dbLoadWorkflowFromPrimaryKey(log *Logger, primary
 		return nil, err
 	}
 
-	return dsp._dbLoadWorkflowFromPrimaryKey(log, &context, primaryKey)
+	return dsp._LoadWorkflowSources(log, &context, primaryKey)
 }
 
-func (dsp *DatabaseDispatcher) _dbLoadWorkflowFromPrimaryKey(log *Logger, context *WorkflowContext, primaryKey int64) (*WorkflowContext, error) {
+func (dsp *DatabaseDispatcher) _LoadWorkflowSources(log *Logger, context *WorkflowContext, primaryKey int64) (*WorkflowContext, error) {
 	db := dsp.db
 	var sources WorkflowSources
 
 	context.done = make(chan *WorkflowContext)
-	context.status = dsp.getWorkflowStatus(&DbGetStatus{log, context, make(chan string, 1)})
+	context.status = dsp._GetWorkflowStatus(&DbGetStatus{log, context, make(chan string, 1)})
 
 	query := `SELECT wdl, inputs, options FROM workflow_sources WHERE workflow_id=?`
 	log.Info("[db] %s [%d]", query, context.primaryKey)
