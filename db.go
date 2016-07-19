@@ -5,6 +5,7 @@ import (
 	"errors"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/satori/go.uuid"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -39,21 +40,19 @@ func (dsp *DatabaseDispatcher) Abort() {
 	dsp.wg.Wait()
 }
 
-func tables(log *Logger, db *sql.DB) []string {
+func (dsp *DatabaseDispatcher) tables() []string {
 	query := "SELECT name FROM sqlite_master WHERE type='table';"
-	log.Info(query)
-	rows, err := db.Query(query)
+	dsp.log.DbQuery(query)
+	rows, err := dsp.db.Query(query)
 	e(err)
 	defer rows.Close()
 
-	var tables = make([]string, 20)
-	var i = 0
+	var tables []string
 	for rows.Next() {
 		var name string
 		err = rows.Scan(&name)
 		e(err)
-		tables[i] = name
-		i++
+		tables = append(tables, name)
 	}
 
 	err = rows.Err()
@@ -62,24 +61,24 @@ func tables(log *Logger, db *sql.DB) []string {
 	return tables
 }
 
-func query(log *Logger, db *sql.DB, query string) {
-	log.Info("[db] %s", query)
-	_, err := db.Exec(query)
+func (dsp *DatabaseDispatcher) query(query string) {
+	dsp.log.DbQuery(query)
+	_, err := dsp.db.Exec(query)
 	e(err)
 }
 
-func setup(log *Logger, db *sql.DB) {
-	var tableNames = tables(log, db)
+func (dsp *DatabaseDispatcher) setup() {
+	var tableNames = dsp.tables()
 
 	if !contains("workflow", tableNames) {
-		query(log, db, `CREATE TABLE workflow (
+		dsp.query(`CREATE TABLE workflow (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			uuid TEXT
 		);`)
 	}
 
 	if !contains("workflow_status", tableNames) {
-		query(log, db, `CREATE TABLE workflow_status (
+		dsp.query(`CREATE TABLE workflow_status (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			workflow_id INTEGER NOT NULL,
 			status TEXT,
@@ -89,7 +88,7 @@ func setup(log *Logger, db *sql.DB) {
 	}
 
 	if !contains("workflow_sources", tableNames) {
-		query(log, db, `CREATE TABLE workflow_sources (
+		dsp.query(`CREATE TABLE workflow_sources (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			workflow_id INTEGER NOT NULL,
 			wdl TEXT,
@@ -186,7 +185,7 @@ func (dsp *DatabaseDispatcher) _NewWorkflow(req *DbNewWorkflow) (*WorkflowContex
 	}
 
 	query := `INSERT INTO workflow (uuid) VALUES (?)`
-	log.Info("[db] %s :: %s", query, req.uuid)
+	log.DbQuery(query, req.uuid.String())
 	res, err := tx.Exec(query, req.uuid)
 	if err != nil {
 		return nil, err
@@ -207,7 +206,7 @@ func (dsp *DatabaseDispatcher) _NewWorkflow(req *DbNewWorkflow) (*WorkflowContex
 	}
 
 	query = `INSERT INTO workflow_sources (workflow_id, wdl, inputs, options) VALUES (?, ?, ?, ?)`
-	log.Info("[db] %s", query)
+	log.DbQuery(query)
 	res, err = tx.Exec(query, workflowId, req.sources.wdl, req.sources.inputs, req.sources.options)
 	if err != nil {
 		return nil, err
@@ -224,7 +223,7 @@ func (dsp *DatabaseDispatcher) _NewWorkflow(req *DbNewWorkflow) (*WorkflowContex
 
 	now := time.Now().Format("2006-01-02 15:04:05.999")
 	query = `INSERT INTO workflow_status (workflow_id, status, date) VALUES (?, 'NotStarted', ?)`
-	log.Info("[db] %s :: %d, %s", query, workflowId, now)
+	log.DbQuery(query, strconv.FormatInt(workflowId, 10), now)
 	res, err = tx.Exec(query, workflowId, now)
 	if err != nil {
 		return nil, err
@@ -249,7 +248,7 @@ func (dsp *DatabaseDispatcher) _SetWorkflowStatus(req *DbSetStatus) {
 	log := req.log
 	var nowISO8601 = time.Now().Format("2006-01-02 15:04:05.999")
 	var query = `INSERT INTO workflow_status (workflow_id, status, date) VALUES (?, ?, ?)`
-	log.Info("[db] %s -- [%d, %s, %s]", query, req.id.dbKey(), req.status, nowISO8601)
+	log.DbQuery(query, strconv.FormatInt(req.id.dbKey(), 10), req.status, nowISO8601)
 	_, err := db.Exec(query, req.id.dbKey(), req.status, nowISO8601)
 	e(err)
 }
@@ -258,7 +257,7 @@ func (dsp *DatabaseDispatcher) _GetWorkflowStatus(req *DbGetStatus) string {
 	db := dsp.db
 	log := req.log
 	var query = `SELECT status FROM workflow_status WHERE workflow_id=? ORDER BY datetime(date) DESC, id DESC LIMIT 1`
-	log.Info("[db] %s -- [%d]", query, req.id.dbKey())
+	log.DbQuery(query, strconv.FormatInt(req.id.dbKey(), 10))
 	row := db.QueryRow(query, req.id.dbKey())
 	var status string
 	err := row.Scan(&status)
@@ -274,7 +273,7 @@ func (dsp *DatabaseDispatcher) _GetWorkflowsByStatus(req *DbGetByStatus) ([]*Wor
 		questionMarks[i] = "?"
 	}
 	var query = `SELECT workflow_id FROM (SELECT workflow_id, status, MAX(date) FROM workflow_status GROUP BY workflow_id) WHERE status IN (` + strings.Join(questionMarks, ", ") + `);`
-	log.Info("[db] %s -- [%s]", query, strings.Join(req.statuses, ", "))
+	log.DbQuery(query, req.statuses...)
 
 	queryParams := make([]interface{}, len(req.statuses))
 	for i := range req.statuses {
@@ -305,59 +304,59 @@ func (dsp *DatabaseDispatcher) _GetWorkflowsByStatus(req *DbGetByStatus) ([]*Wor
 	return contexts, nil
 }
 
-func (dispatcher *DatabaseDispatcher) start() {
-	setup(dispatcher.log, dispatcher.db)
+func (dsp *DatabaseDispatcher) start() {
+	dsp.setup()
 
 	defer func() {
-		dispatcher.db.Close()
-		dispatcher.isRunning = false
-		dispatcher.wg.Done()
+		dsp.db.Close()
+		dsp.isRunning = false
+		dsp.wg.Done()
 	}()
 
 	for {
 		select {
-		case _, ok := <-dispatcher.abort:
+		case _, ok := <-dsp.abort:
 			if !ok {
 				return
 			}
-		case action := <-dispatcher.queue:
+		case action := <-dsp.queue:
 			switch t := action.(type) {
 			case DbSetStatus:
-				dispatcher._SetWorkflowStatus(&t)
+				dsp._SetWorkflowStatus(&t)
 				if t.done != nil {
 					*t.done <- true
 				}
 			case DbGetStatus:
-				t.done <- dispatcher._GetWorkflowStatus(&t)
+				t.done <- dsp._GetWorkflowStatus(&t)
 			case DbGetByStatus:
-				uuids, err := dispatcher._GetWorkflowsByStatus(&t)
+				uuids, err := dsp._GetWorkflowsByStatus(&t)
 				if err != nil {
-					dispatcher.log.Info("[db] _GetWorkflowsByStatus failed: %s", err)
+					dsp.log.Info("[db] _GetWorkflowsByStatus failed: %s", err)
 					continue
 				}
 				t.done <- uuids
 			case DbNewWorkflow:
-				ctx, err := dispatcher._NewWorkflow(&t)
+				ctx, err := dsp._NewWorkflow(&t)
 				if err != nil {
-					dispatcher.log.Info("[db] _NewWorkflow failed: %s", err)
+					dsp.log.Info("[db] _NewWorkflow failed: %s", err)
 					continue
 				}
 				t.done <- ctx
 			case DbLoadWorkflow:
-				ctx, err := dispatcher._LoadWorkflowUUID(&t)
+				ctx, err := dsp._LoadWorkflow(&t)
 				if err != nil {
-					dispatcher.log.Info("[db] dbLoadWorkflow failed: %s", err)
+					dsp.log.Info("[db] dbLoadWorkflow failed: %s", err)
 					continue
 				}
 				t.done <- ctx
 			default:
-				dispatcher.log.Info("[db] Invalid DB Action: %T. Value %v", t, t)
+				dsp.log.Info("[db] Invalid DB Action: %T. Value %v", t, t)
 			}
 		}
 	}
 }
 
-func (dsp *DatabaseDispatcher) _LoadWorkflowUUID(req *DbLoadWorkflow) (*WorkflowContext, error) {
+func (dsp *DatabaseDispatcher) _LoadWorkflow(req *DbLoadWorkflow) (*WorkflowContext, error) {
 	db := dsp.db
 	log := req.log
 	var context WorkflowContext
@@ -366,7 +365,7 @@ func (dsp *DatabaseDispatcher) _LoadWorkflowUUID(req *DbLoadWorkflow) (*Workflow
 	context.done = make(chan *WorkflowContext)
 
 	query := `SELECT id FROM workflow WHERE uuid=?`
-	log.Info("[db] %s [%s]", query, req.uuid)
+	log.DbQuery(query, req.uuid.String())
 	row := db.QueryRow(query, req.uuid)
 	err := row.Scan(&context.primaryKey)
 	if err != nil {
@@ -382,7 +381,7 @@ func (dsp *DatabaseDispatcher) _LoadWorkflowPK(log *Logger, primaryKey int64) (*
 	context.primaryKey = primaryKey
 
 	query := `SELECT uuid FROM workflow WHERE id=?`
-	log.Info("[db] %s [%d]", query, primaryKey)
+	log.DbQuery(query, strconv.FormatInt(primaryKey, 10))
 	row := db.QueryRow(query, primaryKey)
 	err := row.Scan(&context.uuid)
 	if err != nil {
@@ -400,7 +399,7 @@ func (dsp *DatabaseDispatcher) _LoadWorkflowSources(log *Logger, context *Workfl
 	context.status = dsp._GetWorkflowStatus(&DbGetStatus{log, context, make(chan string, 1)})
 
 	query := `SELECT wdl, inputs, options FROM workflow_sources WHERE workflow_id=?`
-	log.Info("[db] %s [%d]", query, context.primaryKey)
+	log.DbQuery(query, strconv.FormatInt(context.primaryKey, 10))
 	row := db.QueryRow(query, context.primaryKey)
 	err := row.Scan(&sources.wdl, &sources.inputs, &sources.options)
 	if err != nil {
