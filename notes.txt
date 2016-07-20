@@ -1,0 +1,2 @@
+https://cloud.google.com/genomics/reference/rest/v1alpha2/pipelines?authuser=1
+https://cloud.google.com/genomics/reference/rest/v1alpha2/operations
