@@ -97,9 +97,15 @@ func SubmitHttpEndpoint(wd *WorkflowDispatcher) http.HandlerFunc {
 
 		sources := WorkflowSources{strings.TrimSpace(wdl), strings.TrimSpace(inputs), strings.TrimSpace(options)}
 		uuid := uuid.NewV4()
-		ctx := wd.db.NewWorkflow(uuid, &sources, wd.log)
+		ctx, err := wd.db.NewWorkflow(uuid, &sources, wd.log)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusInternalServerError)
+			io.WriteString(w, fmt.Sprintf(`{"message": "could not persist worflow"}`, r))
+			return
+		}
 
-		fmt.Printf("HTTP endpoint /submit/ received: %s\n", sources)
+		wd.log.Info("HTTP endpoint /submit/ received: %s\n", sources)
 		defer func() {
 			if r := recover(); r != nil {
 				w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -119,9 +125,9 @@ func SubmitHttpEndpoint(wd *WorkflowDispatcher) http.HandlerFunc {
 	}
 }
 
-func (wd *WorkflowDispatcher) runJob(cmd *exec.Cmd, name string, done chan<- string, jobAbort <-chan bool) {
+func (wd *WorkflowDispatcher) runJob(context *WorkflowContext, cmd *exec.Cmd, name string, done chan<- string, jobAbort <-chan bool) {
 	var cmdDone = make(chan bool, 1)
-	var log = wd.log
+	var log = wd.log.ForWorkflow(context.uuid)
 	var isAborting = false
 	log.Info("runJob: start %s", name)
 	defer log.Info("runJob: done %s", name)
@@ -152,7 +158,7 @@ func (wd *WorkflowDispatcher) runJob(cmd *exec.Cmd, name string, done chan<- str
 			} else if !cmd.ProcessState.Success() {
 				status = "failed"
 			}*/
-			log.Info("runJob: finish with: %s", status)
+			log.Info("runJob: %s finish with: %s", name, status)
 			done <- fmt.Sprintf("%s:%s", name, status)
 			return
 		case _, ok := <-jobAbort:
@@ -255,7 +261,7 @@ func (wd *WorkflowDispatcher) runWorkflow(context *WorkflowContext, workflowResu
 				log.Info("workflow: launching call: %s", call)
 				jobAbortMutex.Lock()
 				jobAbort[call] = make(chan bool, 1)
-				go wd.runJob(exec.Command("sleep", "2"), call, jobDone, jobAbort[call])
+				go wd.runJob(context, exec.Command("sleep", "2"), call, jobDone, jobAbort[call])
 				jobAbortMutex.Unlock()
 			case <-workflowDone:
 				log.Info("workflow: completed")
@@ -327,9 +333,10 @@ func (wd *WorkflowDispatcher) runDispatcher() {
 				processDone(d)
 			}
 		} else if workers < wd.maxWorkers {
+			log.Info("------------ accepting messages")
 			select {
 			case wfContext := <-wd.submitChannel:
-				// wf can be a new workflow, or a workflow in progress (restart)
+				log.Info("------------ workflow submission")
 				workers++
 				runningWorkflows[fmt.Sprintf("%s", wfContext.uuid)] = wfContext
 				workflowAbortChannel := make(chan bool, 1)
@@ -397,12 +404,15 @@ func (wd *WorkflowDispatcher) IsAlive() bool {
 	return wd.isAlive
 }
 
-func (wd *WorkflowDispatcher) SubmitWorkflow(wdl, inputs, options string, id uuid.UUID) *WorkflowContext {
+func (wd *WorkflowDispatcher) SubmitWorkflow(wdl, inputs, options string, id uuid.UUID) (*WorkflowContext, error) {
 	sources := WorkflowSources{strings.TrimSpace(wdl), strings.TrimSpace(inputs), strings.TrimSpace(options)}
-	uuid := uuid.NewV4()
-	ctx := wd.db.NewWorkflow(uuid, &sources, wd.log)
+	log := wd.log.ForWorkflow(id)
+	ctx, err := wd.db.NewWorkflow(id, &sources, log)
+	if err != nil {
+		return nil, err
+	}
 	wd.SubmitExistingWorkflow(ctx)
-	return ctx
+	return ctx, nil
 }
 
 func (wd *WorkflowDispatcher) SubmitExistingWorkflow(ctx *WorkflowContext) error {
@@ -446,12 +456,15 @@ func NewEngine(log *Logger, concurrentWorkflows int, submitQueueSize int) *Engin
 }
 
 func (engine *Engine) RunWorkflow(wdl, inputs, options string, id uuid.UUID) *WorkflowContext {
-	ctx := engine.wd.SubmitWorkflow(wdl, inputs, options, id)
-	if ctx == nil {
+	ctx, err := engine.wd.SubmitWorkflow(wdl, inputs, options, id)
+	if err != nil {
 		return nil
 	}
 	result := <-ctx.done
-	wfStatus := engine.db.GetWorkflowStatus(ctx, engine.log)
+	wfStatus, err := engine.db.GetWorkflowStatus(ctx, engine.log)
+	if err != nil {
+		return nil
+	}
 	engine.log.Info("--- Workflow Completed: %s (status %s)", id, wfStatus)
 	return result
 }
@@ -481,6 +494,7 @@ func main() {
 		run          = app.Command("run", "Run workflows")
 		runN         = run.Arg("count", "Number of workflows").Required().Int()
 		server       = app.Command("server", "Start HTTP server")
+		test         = app.Command("test", "test")
 	)
 
 	args, err := app.Parse(os.Args[1:])
@@ -489,7 +503,7 @@ func main() {
 
 	switch kingpin.MustParse(args, err) {
 	case restart.FullCommand():
-		restartableWorkflows := engine.db.GetWorkflowsByStatus(log, "Aborted", "NotStarted", "Started")
+		restartableWorkflows, _ := engine.db.GetWorkflowsByStatus(log, "Aborted", "NotStarted", "Started")
 		var restartWg sync.WaitGroup
 		for _, restartableWfContext := range restartableWorkflows {
 			fmt.Printf("restarting %s\n", restartableWfContext.uuid)
@@ -506,10 +520,28 @@ func main() {
 		for i := 0; i < *runN; i++ {
 			wg.Add(1)
 			go func() {
-				engine.RunWorkflow("wdl", "inputs", "options", uuid.NewV4())
+				id := uuid.NewV4()
+				log.Info("RunWorkflow start: %s\n", id)
+				engine.RunWorkflow("wdl", "inputs", "options", id)
+				log.Info("RunWorkflow exit: %s\n", id)
 				wg.Done()
 			}()
 		}
+		wg.Wait()
+	case test.FullCommand():
+		sources := WorkflowSources{"a", "b", "c"}
+		var wg sync.WaitGroup
+		for i := 0; i < 100; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_, err := engine.db.NewWorkflow(uuid.NewV4(), &sources, engine.log)
+				if err != nil {
+					panic(err)
+				}
+			}()
+		}
+		fmt.Println("exit")
 		wg.Wait()
 	case server.FullCommand():
 		log.Info("Listening on :8000 ...")
