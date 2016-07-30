@@ -7,6 +7,7 @@ import (
 	"github.com/satori/go.uuid"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -15,6 +16,7 @@ type DatabaseDispatcher struct {
 	dataSourceName string
 	log            *Logger
 	db             *sql.DB
+	hackMutex      *sync.Mutex
 }
 
 func NewDatabaseDispatcher(driverName, dataSourceName string, log *Logger) *DatabaseDispatcher {
@@ -22,7 +24,8 @@ func NewDatabaseDispatcher(driverName, dataSourceName string, log *Logger) *Data
 	if err != nil {
 		panic(err)
 	}
-	dsp := &DatabaseDispatcher{driverName, dataSourceName, log, db}
+	var hackMutex sync.Mutex
+	dsp := &DatabaseDispatcher{driverName, dataSourceName, log, db, &hackMutex}
 	dsp.setup()
 	return dsp
 }
@@ -125,6 +128,12 @@ func (dsp *DatabaseDispatcher) setup() {
 }
 
 func (dsp *DatabaseDispatcher) NewWorkflow(uuid uuid.UUID, sources *WorkflowSources, log *Logger) (*WorkflowContext, error) {
+	dsp.hackMutex.Lock()
+	defer func() {
+		dsp.hackMutex.Unlock()
+		log.Info("-- E")
+	}()
+	log.Info("-- S")
 	db := dsp.db
 	var success = false
 	var workflowId int64 = -1

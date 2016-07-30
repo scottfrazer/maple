@@ -407,7 +407,9 @@ func (wd *WorkflowDispatcher) IsAlive() bool {
 func (wd *WorkflowDispatcher) SubmitWorkflow(wdl, inputs, options string, id uuid.UUID) (*WorkflowContext, error) {
 	sources := WorkflowSources{strings.TrimSpace(wdl), strings.TrimSpace(inputs), strings.TrimSpace(options)}
 	log := wd.log.ForWorkflow(id)
+	log.Info("NewWorkflow start")
 	ctx, err := wd.db.NewWorkflow(id, &sources, log)
+	log.Info("NewWorkflow end")
 	if err != nil {
 		return nil, err
 	}
@@ -456,7 +458,9 @@ func NewEngine(log *Logger, concurrentWorkflows int, submitQueueSize int) *Engin
 }
 
 func (engine *Engine) RunWorkflow(wdl, inputs, options string, id uuid.UUID) *WorkflowContext {
+	engine.log.Info("SubmitWorkflow: start")
 	ctx, err := engine.wd.SubmitWorkflow(wdl, inputs, options, id)
+	engine.log.Info("SubmitWorkflow: end")
 	if err != nil {
 		return nil
 	}
