@@ -16,7 +16,7 @@ type DatabaseDispatcher struct {
 	dataSourceName string
 	log            *Logger
 	db             *sql.DB
-	hackMutex      *sync.Mutex
+	mtx            *sync.Mutex
 }
 
 func NewDatabaseDispatcher(driverName, dataSourceName string, log *Logger) *DatabaseDispatcher {
@@ -24,8 +24,8 @@ func NewDatabaseDispatcher(driverName, dataSourceName string, log *Logger) *Data
 	if err != nil {
 		panic(err)
 	}
-	var hackMutex sync.Mutex
-	dsp := &DatabaseDispatcher{driverName, dataSourceName, log, db, &hackMutex}
+	var mtx sync.Mutex
+	dsp := &DatabaseDispatcher{driverName, dataSourceName, log, db, &mtx}
 	dsp.setup()
 	return dsp
 }
@@ -128,12 +128,8 @@ func (dsp *DatabaseDispatcher) setup() {
 }
 
 func (dsp *DatabaseDispatcher) NewWorkflow(uuid uuid.UUID, sources *WorkflowSources, log *Logger) (*WorkflowContext, error) {
-	dsp.hackMutex.Lock()
-	defer func() {
-		dsp.hackMutex.Unlock()
-		log.Info("-- E")
-	}()
-	log.Info("-- S")
+	dsp.mtx.Lock()
+	defer dsp.mtx.Unlock()
 	db := dsp.db
 	var success = false
 	var workflowId int64 = -1
@@ -214,6 +210,8 @@ func (dsp *DatabaseDispatcher) NewWorkflow(uuid uuid.UUID, sources *WorkflowSour
 }
 
 func (dsp *DatabaseDispatcher) LoadWorkflow(uuid uuid.UUID, log *Logger) (*WorkflowContext, error) {
+	dsp.mtx.Lock()
+	defer dsp.mtx.Unlock()
 	db := dsp.db
 	var context WorkflowContext
 
@@ -232,6 +230,8 @@ func (dsp *DatabaseDispatcher) LoadWorkflow(uuid uuid.UUID, log *Logger) (*Workf
 }
 
 func (dsp *DatabaseDispatcher) SetWorkflowStatus(wfId WorkflowIdentifier, status string, log *Logger) (bool, error) {
+	dsp.mtx.Lock()
+	defer dsp.mtx.Unlock()
 	db := dsp.db
 	var nowISO8601 = time.Now().Format("2006-01-02 15:04:05.999")
 	var query = `INSERT INTO workflow_status (workflow_id, status, date) VALUES (?, ?, ?)`
@@ -244,6 +244,8 @@ func (dsp *DatabaseDispatcher) SetWorkflowStatus(wfId WorkflowIdentifier, status
 }
 
 func (dsp *DatabaseDispatcher) GetWorkflowStatus(wfId WorkflowIdentifier, log *Logger) (string, error) {
+	dsp.mtx.Lock()
+	defer dsp.mtx.Unlock()
 	db := dsp.db
 	var query = `SELECT status FROM workflow_status WHERE workflow_id=? ORDER BY datetime(date) DESC, id DESC LIMIT 1`
 	log.DbQuery(query, strconv.FormatInt(wfId.dbKey(), 10))
@@ -257,6 +259,8 @@ func (dsp *DatabaseDispatcher) GetWorkflowStatus(wfId WorkflowIdentifier, log *L
 }
 
 func (dsp *DatabaseDispatcher) GetWorkflowsByStatus(log *Logger, status ...string) ([]*WorkflowContext, error) {
+	dsp.mtx.Lock()
+	defer dsp.mtx.Unlock()
 	db := dsp.db
 	questionMarks := make([]string, len(status))
 	for i := 0; i < len(status); i++ {

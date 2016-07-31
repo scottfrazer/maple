@@ -333,10 +333,8 @@ func (wd *WorkflowDispatcher) runDispatcher() {
 				processDone(d)
 			}
 		} else if workers < wd.maxWorkers {
-			log.Info("------------ accepting messages")
 			select {
 			case wfContext := <-wd.submitChannel:
-				log.Info("------------ workflow submission")
 				workers++
 				runningWorkflows[fmt.Sprintf("%s", wfContext.uuid)] = wfContext
 				workflowAbortChannel := make(chan bool, 1)
@@ -458,9 +456,7 @@ func NewEngine(log *Logger, concurrentWorkflows int, submitQueueSize int) *Engin
 }
 
 func (engine *Engine) RunWorkflow(wdl, inputs, options string, id uuid.UUID) *WorkflowContext {
-	engine.log.Info("SubmitWorkflow: start")
 	ctx, err := engine.wd.SubmitWorkflow(wdl, inputs, options, id)
-	engine.log.Info("SubmitWorkflow: end")
 	if err != nil {
 		return nil
 	}
@@ -525,9 +521,7 @@ func main() {
 			wg.Add(1)
 			go func() {
 				id := uuid.NewV4()
-				log.Info("RunWorkflow start: %s\n", id)
 				engine.RunWorkflow("wdl", "inputs", "options", id)
-				log.Info("RunWorkflow exit: %s\n", id)
 				wg.Done()
 			}()
 		}
