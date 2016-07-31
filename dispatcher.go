@@ -448,8 +448,8 @@ type Engine struct {
 	db  *DatabaseDispatcher
 }
 
-func NewEngine(log *Logger, concurrentWorkflows int, submitQueueSize int) *Engine {
-	db := NewDatabaseDispatcher("sqlite3", "DB", log)
+func NewEngine(log *Logger, dbName string, dbConnection string, concurrentWorkflows int, submitQueueSize int) *Engine {
+	db := NewDatabaseDispatcher(dbName, dbConnection, log)
 	wd := NewWorkflowDispatcher(concurrentWorkflows, submitQueueSize, log, db)
 	SignalHandler(wd)
 	return &Engine{wd, log, db}
@@ -460,13 +460,7 @@ func (engine *Engine) RunWorkflow(wdl, inputs, options string, id uuid.UUID) *Wo
 	if err != nil {
 		return nil
 	}
-	result := <-ctx.done
-	wfStatus, err := engine.db.GetWorkflowStatus(ctx, engine.log)
-	if err != nil {
-		return nil
-	}
-	engine.log.Info("--- Workflow Completed: %s (status %s)", id, wfStatus)
-	return result
+	return <-ctx.done
 }
 
 func (engine *Engine) SubmitWorkflow(wdl, inputs, options string, id uuid.UUID) *WorkflowContext {
@@ -494,12 +488,11 @@ func main() {
 		run          = app.Command("run", "Run workflows")
 		runN         = run.Arg("count", "Number of workflows").Required().Int()
 		server       = app.Command("server", "Start HTTP server")
-		test         = app.Command("test", "test")
 	)
 
 	args, err := app.Parse(os.Args[1:])
 	log := NewLogger().ToFile("myapp.log").ToWriter(os.Stdout)
-	engine := NewEngine(log, *concurrentWf, *queueSize)
+	engine := NewEngine(log, "sqlite3", "DB", *concurrentWf, *queueSize)
 
 	switch kingpin.MustParse(args, err) {
 	case restart.FullCommand():
@@ -521,25 +514,15 @@ func main() {
 			wg.Add(1)
 			go func() {
 				id := uuid.NewV4()
-				engine.RunWorkflow("wdl", "inputs", "options", id)
+				ctx := engine.RunWorkflow("wdl", "inputs", "options", id)
+				if ctx != nil {
+					engine.log.Info("Workflow Complete: %s (status %s)", id, ctx.status)
+				} else {
+					engine.log.Info("Workflow Incomplete")
+				}
 				wg.Done()
 			}()
 		}
-		wg.Wait()
-	case test.FullCommand():
-		sources := WorkflowSources{"a", "b", "c"}
-		var wg sync.WaitGroup
-		for i := 0; i < 100; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				_, err := engine.db.NewWorkflow(uuid.NewV4(), &sources, engine.log)
-				if err != nil {
-					panic(err)
-				}
-			}()
-		}
-		fmt.Println("exit")
 		wg.Wait()
 	case server.FullCommand():
 		log.Info("Listening on :8000 ...")
