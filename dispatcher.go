@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/satori/go.uuid"
+	"golang.org/x/net/context"
 	"gopkg.in/alecthomas/kingpin.v2"
 	"io"
 	"io/ioutil"
@@ -125,18 +126,18 @@ func SubmitHttpEndpoint(wd *WorkflowDispatcher) http.HandlerFunc {
 	}
 }
 
-func (wd *WorkflowDispatcher) runJob(context *WorkflowContext, cmd *exec.Cmd, name string, done chan<- string, jobAbort <-chan bool) {
+func (wd *WorkflowDispatcher) runJob(wfCtx *WorkflowContext, cmd *exec.Cmd, name string, done chan<- string, jobCtx context.Context) {
 	var cmdDone = make(chan bool, 1)
-	var log = wd.log.ForWorkflow(context.uuid)
+	var log = wd.log.ForWorkflow(wfCtx.uuid)
 	var isAborting = false
 	log.Info("runJob: start %s", name)
 	defer log.Info("runJob: done %s", name)
-	hack := make(chan int, 1)
+	subprocessCtx, subprocessCancel := context.WithCancel(jobCtx)
 
 	go func() {
 		select {
 		case <-time.After(time.Second * 2):
-		case <-hack:
+		case <-subprocessCtx.Done():
 		}
 		//cmd.Run()
 		cmdDone <- true
@@ -161,25 +162,25 @@ func (wd *WorkflowDispatcher) runJob(context *WorkflowContext, cmd *exec.Cmd, na
 			log.Info("runJob: %s finish with: %s", name, status)
 			done <- fmt.Sprintf("%s:%s", name, status)
 			return
-		case _, ok := <-jobAbort:
-			if !ok && !isAborting {
+		case <-jobCtx.Done():
+			if !isAborting {
 				log.Info("runJob: abort")
-				hack <- 1
+				subprocessCancel()
 				isAborting = true
 			}
 		}
 	}
 }
 
-func (wd *WorkflowDispatcher) runWorkflow(context *WorkflowContext, workflowResultsChannel chan<- *WorkflowContext, workflowAbortChannel <-chan bool) {
-	var log = wd.log.ForWorkflow(context.uuid)
+func (wd *WorkflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResultsChannel chan<- *WorkflowContext, workflowAbortChannel <-chan bool) {
+	var log = wd.log.ForWorkflow(wfCtx.uuid)
 
 	log.Info("runWorkflow: start")
-	wd.db.SetWorkflowStatus(context, "Started", log)
-	context.status = "Started"
+	wd.db.SetWorkflowStatus(wfCtx, "Started", log)
+	wfCtx.status = "Started"
 
 	var jobDone = make(chan string)
-	var jobAbort = make(map[string]chan bool)
+	var jobAbort = make(map[string]func())
 	var jobAbortMutex sync.Mutex
 	var workflowDone = make(chan bool)
 	var workflowTimeout = time.After(wd.workflowMaxRuntime)
@@ -188,17 +189,17 @@ func (wd *WorkflowDispatcher) runWorkflow(context *WorkflowContext, workflowResu
 	var isAborting = false
 
 	defer func() {
-		context.done <- context
-		close(context.done)
-		workflowResultsChannel <- context
+		wfCtx.done <- wfCtx
+		close(wfCtx.done)
+		workflowResultsChannel <- wfCtx
 	}()
 
 	var abortSubprocesses = func() {
-		for _, v := range jobAbort {
-			close(v)
+		for _, jobCloseFunc := range jobAbort {
+			jobCloseFunc()
 		}
-		wd.db.SetWorkflowStatus(context, "Aborted", log)
-		context.status = "Aborted"
+		wd.db.SetWorkflowStatus(wfCtx, "Aborted", log)
+		wfCtx.status = "Aborted"
 		isAborting = true
 	}
 
@@ -241,9 +242,9 @@ func (wd *WorkflowDispatcher) runWorkflow(context *WorkflowContext, workflowResu
 			select {
 			case <-workflowDone:
 				log.Info("workflow: completed")
-				if context.status != "Aborted" {
-					context.status = "Done"
-					wd.db.SetWorkflowStatus(context, "Done", log)
+				if wfCtx.status != "Aborted" {
+					wfCtx.status = "Done"
+					wd.db.SetWorkflowStatus(wfCtx, "Done", log)
 				}
 				return
 			case status := <-jobDone:
@@ -260,13 +261,14 @@ func (wd *WorkflowDispatcher) runWorkflow(context *WorkflowContext, workflowResu
 			case call := <-calls:
 				log.Info("workflow: launching call: %s", call)
 				jobAbortMutex.Lock()
-				jobAbort[call] = make(chan bool, 1)
-				go wd.runJob(context, exec.Command("sleep", "2"), call, jobDone, jobAbort[call])
+				jobCtx, cancel := context.WithCancel(context.Background())
+				jobAbort[call] = cancel
+				go wd.runJob(wfCtx, exec.Command("sleep", "2"), call, jobDone, jobCtx)
 				jobAbortMutex.Unlock()
 			case <-workflowDone:
 				log.Info("workflow: completed")
-				context.status = "Done"
-				wd.db.SetWorkflowStatus(context, "Done", log)
+				wfCtx.status = "Done"
+				wd.db.SetWorkflowStatus(wfCtx, "Done", log)
 				return
 			case status := <-jobDone:
 				log.Info("workflow: subprocess finished: %s", status)
@@ -405,9 +407,7 @@ func (wd *WorkflowDispatcher) IsAlive() bool {
 func (wd *WorkflowDispatcher) SubmitWorkflow(wdl, inputs, options string, id uuid.UUID) (*WorkflowContext, error) {
 	sources := WorkflowSources{strings.TrimSpace(wdl), strings.TrimSpace(inputs), strings.TrimSpace(options)}
 	log := wd.log.ForWorkflow(id)
-	log.Info("NewWorkflow start")
 	ctx, err := wd.db.NewWorkflow(id, &sources, log)
-	log.Info("NewWorkflow end")
 	if err != nil {
 		return nil, err
 	}
