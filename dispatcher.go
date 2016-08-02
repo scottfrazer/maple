@@ -23,7 +23,7 @@ type WorkflowDispatcher struct {
 	maxWorkers         int
 	submitChannel      chan *WorkflowContext
 	submitChannelMutex *sync.Mutex
-	abortChannel       chan bool
+	cancel             func()
 	waitGroup          *sync.WaitGroup
 	db                 *DatabaseDispatcher
 	workflowMaxRuntime time.Duration
@@ -172,7 +172,7 @@ func (wd *WorkflowDispatcher) runJob(wfCtx *WorkflowContext, cmd *exec.Cmd, name
 	}
 }
 
-func (wd *WorkflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResultsChannel chan<- *WorkflowContext, workflowAbortChannel <-chan bool) {
+func (wd *WorkflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResultsChannel chan<- *WorkflowContext, ctx context.Context) {
 	var log = wd.log.ForWorkflow(wfCtx.uuid)
 
 	log.Info("runWorkflow: start")
@@ -183,14 +183,15 @@ func (wd *WorkflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResult
 	var jobAbort = make(map[string]func())
 	var jobAbortMutex sync.Mutex
 	var workflowDone = make(chan bool)
-	var workflowTimeout = time.After(wd.workflowMaxRuntime)
 	var call_status = make(map[string]string)
 	var calls = make(chan string, 20)
 	var isAborting = false
+	var doneCalls = make(chan string)
 
 	defer func() {
 		wfCtx.done <- wfCtx
 		close(wfCtx.done)
+		close(doneCalls)
 		workflowResultsChannel <- wfCtx
 	}()
 
@@ -203,7 +204,6 @@ func (wd *WorkflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResult
 		isAborting = true
 	}
 
-	var doneCalls = make(chan string)
 	var runnableDependents = func(c string) []string {
 		if c == "workflow" {
 			return []string{"A", "B", "C", "D"}
@@ -238,7 +238,6 @@ func (wd *WorkflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResult
 
 	for {
 		if isAborting {
-			log.Info("isAborting state... receiving message")
 			select {
 			case <-workflowDone:
 				log.Info("workflow: completed")
@@ -255,9 +254,6 @@ func (wd *WorkflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResult
 			}
 		} else {
 			select {
-			case <-workflowTimeout:
-				log.Info("workflow: done (timeout %s)", wd.workflowMaxRuntime)
-				abortSubprocesses()
 			case call := <-calls:
 				log.Info("workflow: launching call: %s", call)
 				jobAbortMutex.Lock()
@@ -275,28 +271,27 @@ func (wd *WorkflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResult
 				var split = strings.Split(status, ":")
 				var call = split[0]
 				doneCalls <- call
-			case _, ok := <-workflowAbortChannel:
-				if !ok {
-					log.Info("workflow: aborting...")
-					abortSubprocesses()
+			case <-ctx.Done():
+				// this is for cancellations AND timeouts
+				log.Info("workflow: aborting...")
+				abortSubprocesses()
 
-					jobAbortMutex.Lock()
-					if len(jobAbort) == 0 {
-						jobAbortMutex.Unlock()
-						return
-					}
+				jobAbortMutex.Lock()
+				if len(jobAbort) == 0 {
 					jobAbortMutex.Unlock()
+					return
 				}
+				jobAbortMutex.Unlock()
 			}
 		}
 	}
 }
 
-func (wd *WorkflowDispatcher) runDispatcher() {
+func (wd *WorkflowDispatcher) runDispatcher(ctx context.Context) {
 	var workers = 0
 	var isAborting = false
 	var workflowDone = make(chan *WorkflowContext)
-	var workflowAbort = make(map[string]chan bool)
+	var workflowAbort = make(map[string]func())
 	var runningWorkflows = make(map[string]*WorkflowContext)
 	var log = wd.log
 
@@ -313,8 +308,8 @@ func (wd *WorkflowDispatcher) runDispatcher() {
 		wd.submitChannelMutex.Unlock()
 
 		isAborting = true
-		for _, v := range workflowAbort {
-			close(v)
+		for _, wfCancelFunc := range workflowAbort {
+			wfCancelFunc()
 		}
 	}
 
@@ -339,25 +334,21 @@ func (wd *WorkflowDispatcher) runDispatcher() {
 			case wfContext := <-wd.submitChannel:
 				workers++
 				runningWorkflows[fmt.Sprintf("%s", wfContext.uuid)] = wfContext
-				workflowAbortChannel := make(chan bool, 1)
-				workflowAbort[fmt.Sprintf("%s", wfContext.uuid)] = workflowAbortChannel
+				workflowCtx, workflowCancel := context.WithTimeout(ctx, wd.workflowMaxRuntime)
+				workflowAbort[fmt.Sprintf("%s", wfContext.uuid)] = workflowCancel
 				log.Info("dispatcher: starting %s", wfContext.uuid)
-				go wd.runWorkflow(wfContext, workflowDone, workflowAbortChannel)
+				go wd.runWorkflow(wfContext, workflowDone, workflowCtx)
 			case d := <-workflowDone:
 				processDone(d)
-			case _, ok := <-wd.abortChannel:
-				if !ok {
-					abort()
-				}
+			case <-ctx.Done():
+				abort()
 			}
 		} else {
 			select {
 			case d := <-workflowDone:
 				processDone(d)
-			case _, ok := <-wd.abortChannel:
-				if !ok {
-					abort()
-				}
+			case <-ctx.Done():
+				abort()
 			}
 		}
 	}
@@ -366,6 +357,7 @@ func (wd *WorkflowDispatcher) runDispatcher() {
 func NewWorkflowDispatcher(workers int, buffer int, log *Logger, db *DatabaseDispatcher) *WorkflowDispatcher {
 	var waitGroup sync.WaitGroup
 	var mutex sync.Mutex
+	dispatcherCtx, dispatcherCancel := context.WithCancel(context.Background())
 
 	mutex.Lock()
 	defer mutex.Unlock()
@@ -375,14 +367,14 @@ func NewWorkflowDispatcher(workers int, buffer int, log *Logger, db *DatabaseDis
 		workers,
 		make(chan *WorkflowContext, buffer),
 		&mutex,
-		make(chan bool),
+		dispatcherCancel,
 		&waitGroup,
 		db,
 		time.Second * 30,
 		log}
 
 	waitGroup.Add(1)
-	go wd.runDispatcher()
+	go wd.runDispatcher(dispatcherCtx)
 	return wd
 }
 
@@ -390,7 +382,7 @@ func (wd *WorkflowDispatcher) Abort() {
 	if !wd.isAlive {
 		return
 	}
-	close(wd.abortChannel)
+	wd.cancel()
 	wd.Wait()
 }
 
