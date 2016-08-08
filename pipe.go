@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"os"
 	"syscall"
 	"time"
@@ -14,25 +15,37 @@ type NonBlockingFifo struct {
 	path string
 }
 
-func NewNonBlockingFifo(path string, timeout time.Duration) *NonBlockingFifo {
-	syscall.Mkfifo(path, 0777)
+func NewNonBlockingFifo(path string, timeout time.Duration) (*NonBlockingFifo, error) {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		syscall.Mkfifo(path, 0777)
+	}
 	fifo := NonBlockingFifo{nil, path}
-	fifoOpen := make(chan bool)
+	fifoOpen := make(chan error)
 
 	go func() {
-		fifo.fp, _ = os.OpenFile(path, os.O_WRONLY, os.ModeNamedPipe)
-		fifoOpen <- true
+		fp, err := os.OpenFile(path, os.O_WRONLY, os.ModeNamedPipe)
+		if err == nil {
+			fifo.fp = fp
+		}
+		fifoOpen <- err
 	}()
 
 	select {
-	case <-fifoOpen:
+	case err := <-fifoOpen:
+		if err != nil {
+			return nil, err
+		}
 	case <-time.After(timeout):
-		reader, _ := os.OpenFile(path, os.O_RDONLY, os.ModeNamedPipe)
+		reader, err := os.OpenFile(path, os.O_RDONLY, os.ModeNamedPipe)
+		if err != nil {
+			return nil, err
+		}
 		reader.Close()
 		<-fifoOpen
 	}
 
-	return &fifo
+	fmt.Printf("returning fifo: %v\n", fifo)
+	return &fifo, nil
 }
 
 func (fifo *NonBlockingFifo) Write(p []byte) (n int, err error) {
@@ -60,10 +73,14 @@ func main() {
 	}
 
 	if os.Args[1] == "server" {
-		fifo := NewNonBlockingFifo("fifo0", time.Second*5)
-		defer fifo.Close()
+		fifo, err := NewNonBlockingFifo("fifo0", time.Second*5)
+		if err != nil {
+			log.Fatalf("could not create fifo: %s\n", err)
+		}
+		fifo.Close()
+
 		w := io.MultiWriter(os.Stdout, fifo)
-		for i := 0; i < 100; i++ {
+		for i := 0; i < 5; i++ {
 			_, err := fmt.Fprintf(w, "%010d%s\n", i, dots)
 			if err != nil {
 				fmt.Printf("error: %s\n", err)
