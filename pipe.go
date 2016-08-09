@@ -5,7 +5,10 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"net/http"
 	"os"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -58,34 +61,57 @@ func (fifo *NonBlockingFifo) Close() {
 }
 
 func main() {
-	var dots [990]byte
-	for i := 0; i < len(dots); i++ {
-		dots[i] = '.'
-	}
-
 	if os.Args[1] == "client" {
-		fp, err := os.OpenFile(os.Args[2], os.O_RDONLY, 0777)
+		resp, err := http.Get("http://localhost:8765/run")
 		if err != nil {
-			fmt.Printf("Error opening %s: %s", os.Args[2], err)
+			log.Fatalf("Could not connect to server: %s", err)
+		}
+		defer resp.Body.Close()
+		fifoPath, err := ioutil.ReadAll(resp.Body)
+
+		fmt.Printf("FIFO: %s\n", fifoPath)
+		fp, err := os.OpenFile(string(fifoPath), os.O_RDONLY, 0777)
+		if err != nil {
+			fmt.Printf("Error opening %s: %s", fifoPath, err)
 		}
 		tee := io.TeeReader(fp, os.Stdout)
 		ioutil.ReadAll(tee)
 	}
 
 	if os.Args[1] == "server" {
-		fifo, err := NewNonBlockingFifo("fifo0", time.Second*5)
-		if err != nil {
-			log.Fatalf("could not create fifo: %s\n", err)
+		type Proc struct {
+			fifo string
+			//log  *Logger
 		}
-		fifo.Close()
+		dots := strings.Repeat(".", 990)
+		procs := make(map[int]*Proc)
+		procsId := 0
+		var procsMutex sync.Mutex
 
-		w := io.MultiWriter(os.Stdout, fifo)
-		for i := 0; i < 5; i++ {
-			_, err := fmt.Fprintf(w, "%010d%s\n", i, dots)
-			if err != nil {
-				fmt.Printf("error: %s\n", err)
-			}
-			time.Sleep(time.Millisecond * 200)
-		}
+		fmt.Println(procs, procsId, procsMutex)
+
+		// GET /run: spin up goroutine, adds procId -> Proc{null, globalLogger}
+		// GET /attach/ID: create fifo; respond; goroutine to test FIFO and add
+		//                 to procs[ID].log = procs[ID].log.WithWriter(fifo)
+		http.HandleFunc("/run", func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, "fifo0")
+			go func() {
+				fifo, err := NewNonBlockingFifo("fifo0", time.Second*5)
+				if err != nil {
+					log.Fatalf("could not create fifo: %s\n", err)
+				}
+				defer fifo.Close()
+
+				log := io.MultiWriter(os.Stdout, fifo)
+				for i := 0; i < 5; i++ {
+					_, err := fmt.Fprintf(log, "%010d%s\n", i, dots)
+					if err != nil {
+						fmt.Printf("error: %s\n", err)
+					}
+					time.Sleep(time.Millisecond * 200)
+				}
+			}()
+		})
+		log.Fatal(http.ListenAndServe(":8765", nil))
 	}
 }
