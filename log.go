@@ -35,8 +35,8 @@ func (log *Logger) ToFile(path string) *Logger {
 }
 
 func (log *Logger) ToWriter(writer io.Writer) *Logger {
-	log.writer = io.MultiWriter(log.writer, writer)
-	return log
+	w := io.MultiWriter(log.writer, writer)
+	return &Logger{log.prefix, w, log.mutex, log.wfLogsPath, log.callLogsPath, log.logQueries}
 }
 
 func (log *Logger) ForWorkflow(uuid uuid.UUID) *Logger {
