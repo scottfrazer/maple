@@ -51,11 +51,22 @@ func (g *Graph) Upstream(n *Node) []*Node {
 		for _, node := range g.nodes {
 			if node != nil && node.name == input {
 				upstream = append(upstream, node)
-				upstream = append(upstream, g.Upstream(node)...)
 			}
 		}
 	}
 	return upstream
+}
+
+func (g *Graph) Downstream(n *Node) []*Node {
+	downstream := make([]*Node, 0)
+	for _, node := range g.nodes {
+		for _, node2 := range g.Upstream(node) {
+			if node2 == n {
+				downstream = append(downstream, node)
+			}
+		}
+	}
+	return downstream
 }
 
 func LoadGraph(reader io.Reader) *Graph {

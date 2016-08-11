@@ -41,11 +41,15 @@ type WorkflowSources struct {
 	options string
 }
 
-type CallStatus struct {
-	call    string
+type CallContext struct {
+	node    *Node
 	index   int
 	attempt int
 	status  string
+}
+
+func (ctx *CallContext) String() string {
+	return fmt.Sprintf("%s (%s)", ctx.node.name, ctx.status)
 }
 
 type WorkflowContext struct {
@@ -54,7 +58,7 @@ type WorkflowContext struct {
 	done       chan *WorkflowContext
 	source     *WorkflowSources
 	status     string
-	callStatus *[]CallStatus
+	calls      []*CallContext
 }
 
 func (c WorkflowContext) id() uuid.UUID {
@@ -126,12 +130,12 @@ func SubmitHttpEndpoint(wd *WorkflowDispatcher) http.HandlerFunc {
 	}
 }
 
-func (wd *WorkflowDispatcher) runJob(wfCtx *WorkflowContext, cmd *exec.Cmd, name string, done chan<- string, jobCtx context.Context) {
+func (wd *WorkflowDispatcher) runJob(wfCtx *WorkflowContext, cmd *exec.Cmd, callCtx *CallContext, done chan<- *CallContext, jobCtx context.Context) {
 	var cmdDone = make(chan bool, 1)
 	var log = wd.log.ForWorkflow(wfCtx.uuid)
 	var isAborting = false
-	log.Info("runJob: start %s", name)
-	defer log.Info("runJob: done %s", name)
+	log.Info("runJob: start %s", callCtx.String())
+	defer log.Info("runJob: done %s", callCtx.String())
 	subprocessCtx, subprocessCancel := context.WithCancel(jobCtx)
 
 	go func() {
@@ -153,14 +157,14 @@ func (wd *WorkflowDispatcher) runJob(wfCtx *WorkflowContext, cmd *exec.Cmd, name
 	for {
 		select {
 		case <-cmdDone:
-			var status = "done"
+			var status = "Done"
 			/*if cmd.ProcessState == nil {
 				status = "no-create"
 			} else if !cmd.ProcessState.Success() {
 				status = "failed"
 			}*/
-			log.Info("runJob: %s finish with: %s", name, status)
-			done <- fmt.Sprintf("%s:%s", name, status)
+			log.Info("runJob: %s finish with: %s", callCtx.String(), status)
+			done <- &CallContext{callCtx.node, 0, 1, status}
 			return
 		case <-jobCtx.Done():
 			if !isAborting {
@@ -179,14 +183,14 @@ func (wd *WorkflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResult
 	wd.db.SetWorkflowStatus(wfCtx, "Started", log)
 	wfCtx.status = "Started"
 
-	var jobDone = make(chan string)
-	var jobAbort = make(map[string]func())
+	var jobDone = make(chan *CallContext)
+	// TODO: get rid of jobAbort, set the cancellation function on the CallContext
+	var jobAbort = make(map[*Node]func())
 	var jobAbortMutex sync.Mutex
 	var workflowDone = make(chan bool)
-	var call_status = make(map[string]string)
-	var calls = make(chan string, 20)
+	var calls = make(chan *Node, 20)
 	var isAborting = false
-	var doneCalls = make(chan string)
+	var doneCalls = make(chan *CallContext)
 
 	defer func() {
 		wfCtx.done <- wfCtx
@@ -204,37 +208,38 @@ func (wd *WorkflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResult
 		isAborting = true
 	}
 
-	var runnableDependents = func(c string) []string {
-		if c == "workflow" {
-			return []string{"A", "B", "C", "D"}
-		} else if c == "D" {
-			return []string{"E", "F"}
-		} else if c == "F" {
-			return []string{"G"}
-		}
-		return []string{}
-	}
-
 	go func() {
+		reader := strings.NewReader(`
+[1]A[2]
+[1]B[3,4]
+[1]C[2]
+[1]D[1]
+[D,1]E[]
+[D]F[0]
+[F]G[]
+[G]H[]`)
+		graph := LoadGraph(reader)
+		for _, root := range graph.Root() {
+			calls <- root
+		}
+
 		for call := range doneCalls {
-			call_status[call] = "Done"
+			wfCtx.calls = append(wfCtx.calls, call)
 
 			jobAbortMutex.Lock()
-			delete(jobAbort, call)
+			delete(jobAbort, call.node)
 			jobAbortMutex.Unlock()
 
-			if len(call_status) == 8 || (isAborting && len(jobAbort) == 0) {
+			if len(wfCtx.calls) == len(graph.nodes) || (isAborting && len(jobAbort) == 0) {
 				workflowDone <- true
 				return
 			} else if !isAborting {
-				for _, nextCall := range runnableDependents(call) {
+				for _, nextCall := range graph.Downstream(call.node) {
 					calls <- nextCall
 				}
 			}
 		}
 	}()
-
-	doneCalls <- "workflow"
 
 	for {
 		if isAborting {
@@ -246,10 +251,8 @@ func (wd *WorkflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResult
 					wd.db.SetWorkflowStatus(wfCtx, "Done", log)
 				}
 				return
-			case status := <-jobDone:
-				log.Info("workflow: subprocess finished: %s", status)
-				var split = strings.Split(status, ":")
-				var call = split[0]
+			case call := <-jobDone:
+				log.Info("workflow: subprocess finished: %s", call.status)
 				doneCalls <- call
 			}
 		} else {
@@ -259,17 +262,15 @@ func (wd *WorkflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResult
 				jobAbortMutex.Lock()
 				jobCtx, cancel := context.WithCancel(context.Background())
 				jobAbort[call] = cancel
-				go wd.runJob(wfCtx, exec.Command("sleep", "2"), call, jobDone, jobCtx)
+				go wd.runJob(wfCtx, exec.Command("sleep", "2"), &CallContext{call, 0, 1, "NotStarted"}, jobDone, jobCtx)
 				jobAbortMutex.Unlock()
 			case <-workflowDone:
 				log.Info("workflow: completed")
 				wfCtx.status = "Done"
 				wd.db.SetWorkflowStatus(wfCtx, "Done", log)
 				return
-			case status := <-jobDone:
-				log.Info("workflow: subprocess finished: %s", status)
-				var split = strings.Split(status, ":")
-				var call = split[0]
+			case call := <-jobDone:
+				log.Info("workflow: subprocess finished: %s", call.status)
 				doneCalls <- call
 			case <-ctx.Done():
 				// this is for cancellations AND timeouts
