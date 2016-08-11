@@ -121,7 +121,7 @@ func main() {
 			procs[reqId] = proc
 
 			go func(proc *Proc) {
-				for i := 0; i < 100; i++ {
+				for i := 0; i < 10; i++ {
 					proc.log.Info("%04d-%010d%s\n", proc.id, i, dots)
 					time.Sleep(time.Millisecond * 1000)
 				}
@@ -129,6 +129,9 @@ func main() {
 					proc.fifo.Close()
 					proc.fifo = nil
 				}
+				procsMutex.Lock()
+				defer procsMutex.Unlock()
+				delete(procs, reqId)
 			}(proc)
 
 			fmt.Fprintf(w, "%d", reqId)
