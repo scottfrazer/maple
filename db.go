@@ -106,11 +106,9 @@ func (dsp *DatabaseDispatcher) setup() {
 	if !contains("job_status", tableNames) {
 		dsp.query(`CREATE TABLE job_status (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			workflow_id INTEGER NOT NULL,
 			job_id INTEGER NOT NULL,
 			status TEXT,
 			date TEXT,
-			FOREIGN KEY(workflow_id) REFERENCES workflow(id)
 			FOREIGN KEY(job_id) REFERENCES job(id)
 		);`)
 	}
@@ -125,6 +123,102 @@ func (dsp *DatabaseDispatcher) setup() {
 			FOREIGN KEY(workflow_id) REFERENCES workflow(id)
 		);`)
 	}
+}
+
+func (dsp *DatabaseDispatcher) NewJob(wfCtx *WorkflowContext, node *Node, log *Logger) (*JobContext, error) {
+	dsp.mtx.Lock()
+	defer dsp.mtx.Unlock()
+	db := dsp.db
+	var success = false
+	var jobId int64 = -1
+
+	tx, err := db.Begin()
+
+	defer func() {
+		if tx != nil {
+			if success {
+				tx.Commit()
+			} else {
+				tx.Rollback()
+			}
+		}
+	}()
+
+	if err != nil {
+		return nil, err
+	}
+
+	query := `INSERT INTO job (workflow_id, call_fqn, shard, attempt) VALUES (?, ?, ?, ?)`
+	log.DbQuery(query, strconv.FormatInt(wfCtx.primaryKey, 10), node.name, "0", "1")
+	res, err := tx.Exec(query, wfCtx.primaryKey, node.name, 0, 1)
+	if err != nil {
+		return nil, err
+	}
+
+	jobId, err = res.LastInsertId()
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+
+	if rows != 1 {
+		return nil, errors.New("could not insert into 'job' table")
+	}
+
+	now := time.Now().Format("2006-01-02 15:04:05.999")
+	query = `INSERT INTO job_status (job_id, status, date) VALUES (?, 'NotStarted', ?)`
+	log.DbQuery(query, strconv.FormatInt(jobId, 10), now)
+	res, err = tx.Exec(query, jobId, now)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err = res.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+
+	if rows != 1 {
+		return nil, errors.New("could not insert into 'job_status' table")
+	}
+
+	ctx := JobContext{jobId, node, 0, 1, "NotStarted"}
+	success = true
+	return &ctx, nil
+}
+
+func (dsp *DatabaseDispatcher) SetJobStatus(jobCtx *JobContext, status string, log *Logger) (bool, error) {
+	dsp.mtx.Lock()
+	defer dsp.mtx.Unlock()
+	db := dsp.db
+	var nowISO8601 = time.Now().Format("2006-01-02 15:04:05.999")
+	var query = `INSERT INTO job_status (job_id, status, date) VALUES (?, ?, ?)`
+	log.DbQuery(query, strconv.FormatInt(jobCtx.primaryKey, 10), status, nowISO8601)
+	_, err := db.Exec(query, jobCtx.primaryKey, status, nowISO8601)
+	if err != nil {
+		return false, err
+	}
+	jobCtx.status = status
+	return true, nil
+}
+
+func (dsp *DatabaseDispatcher) GetJobStatus(jobId int64, log *Logger) (string, error) {
+	dsp.mtx.Lock()
+	defer dsp.mtx.Unlock()
+	db := dsp.db
+	var query = `SELECT status FROM job_status WHERE job_id=? ORDER BY datetime(date) DESC, id DESC LIMIT 1`
+	log.DbQuery(query, strconv.FormatInt(jobId, 10))
+	row := db.QueryRow(query, jobId)
+	var status string
+	err := row.Scan(&status)
+	if err != nil {
+		return "", err
+	}
+	return status, nil
 }
 
 func (dsp *DatabaseDispatcher) NewWorkflow(uuid uuid.UUID, sources *WorkflowSources, log *Logger) (*WorkflowContext, error) {
