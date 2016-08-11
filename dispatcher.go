@@ -215,15 +215,7 @@ func (wd *WorkflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResult
 	}
 
 	go func() {
-		reader := strings.NewReader(`
-[1]A[2]
-[1]B[3,4]
-[1]C[2]
-[1]D[1]
-[D,1]E[]
-[D]F[0]
-[F]G[]
-[G]H[]`)
+		reader := strings.NewReader(wfCtx.source.wdl)
 		graph := LoadGraph(reader)
 		for _, root := range graph.Root() {
 			calls <- root
@@ -490,7 +482,8 @@ func main() {
 		concurrentWf = app.Flag("concurrent-workflows", "Number of workflows").Default("1000").Int()
 		restart      = app.Command("restart", "Restart workflows")
 		run          = app.Command("run", "Run workflows")
-		runN         = run.Arg("count", "Number of workflows").Required().Int()
+		runGraph     = run.Arg("wdl", "Graph file").Required().String()
+		runN         = run.Arg("count", "Number of instances").Required().Int()
 		server       = app.Command("server", "Start HTTP server")
 	)
 
@@ -517,8 +510,14 @@ func main() {
 		for i := 0; i < *runN; i++ {
 			wg.Add(1)
 			go func() {
+				contents, err := ioutil.ReadFile(*runGraph)
+				if err != nil {
+					// TODO: don't panic
+					panic(err)
+				}
+
 				id := uuid.NewV4()
-				ctx := engine.RunWorkflow("wdl", "inputs", "options", id)
+				ctx := engine.RunWorkflow(string(contents), "inputs", "options", id)
 				if ctx != nil {
 					engine.log.Info("Workflow Complete: %s (status %s)", id, ctx.status)
 				} else {
