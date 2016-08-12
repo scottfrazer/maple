@@ -133,10 +133,10 @@ func SubmitHttpEndpoint(wd *WorkflowDispatcher) http.HandlerFunc {
 
 func (wd *WorkflowDispatcher) runJob(wfCtx *WorkflowContext, cmd *exec.Cmd, callCtx *JobContext, done chan<- *JobContext, jobCtx context.Context) {
 	var cmdDone = make(chan bool, 1)
-	var log = wd.log.ForWorkflow(wfCtx.uuid)
+	var log = wd.log.ForJob(wfCtx.uuid, callCtx)
 	var isAborting = false
-	log.Info("runJob: start %s", callCtx.String())
-	defer log.Info("runJob: done %s", callCtx.String())
+	log.Info("runJob: enter")
+	defer log.Info("runJob: exit")
 	subprocessCtx, subprocessCancel := context.WithCancel(jobCtx)
 
 	wd.db.SetJobStatus(callCtx, "Started", log)
@@ -166,7 +166,7 @@ func (wd *WorkflowDispatcher) runJob(wfCtx *WorkflowContext, cmd *exec.Cmd, call
 			} else if !cmd.ProcessState.Success() {
 				status = "failed"
 			}*/
-			log.Info("runJob: %s finish with: %s", callCtx.String(), status)
+			log.Info("runJob: done (status %s)", status)
 			wd.db.SetJobStatus(callCtx, status, log)
 			done <- callCtx
 			return
@@ -438,40 +438,40 @@ func SignalHandler(wd *WorkflowDispatcher) {
 	}(wd)
 }
 
-type Engine struct {
+type Kernel struct {
 	wd  *WorkflowDispatcher
 	log *Logger
 	db  *DatabaseDispatcher
 }
 
-func NewEngine(log *Logger, dbName string, dbConnection string, concurrentWorkflows int, submitQueueSize int) *Engine {
+func NewKernel(log *Logger, dbName string, dbConnection string, concurrentWorkflows int, submitQueueSize int) *Kernel {
 	db := NewDatabaseDispatcher(dbName, dbConnection, log)
 	wd := NewWorkflowDispatcher(concurrentWorkflows, submitQueueSize, log, db)
 	SignalHandler(wd)
-	return &Engine{wd, log, db}
+	return &Kernel{wd, log, db}
 }
 
-func (engine *Engine) RunWorkflow(wdl, inputs, options string, id uuid.UUID) *WorkflowContext {
-	ctx, err := engine.wd.SubmitWorkflow(wdl, inputs, options, id)
+func (kernel *Kernel) RunWorkflow(wdl, inputs, options string, id uuid.UUID) *WorkflowContext {
+	ctx, err := kernel.wd.SubmitWorkflow(wdl, inputs, options, id)
 	if err != nil {
 		return nil
 	}
 	return <-ctx.done
 }
 
-func (engine *Engine) SubmitWorkflow(wdl, inputs, options string, id uuid.UUID) *WorkflowContext {
+func (kernel *Kernel) SubmitWorkflow(wdl, inputs, options string, id uuid.UUID) *WorkflowContext {
 	return nil
 }
 
-func (engine *Engine) AbortWorkflow(uuid uuid.UUID) error {
+func (kernel *Kernel) AbortWorkflow(uuid uuid.UUID) error {
 	return nil
 }
 
-func (engine *Engine) ListWorkflows() []uuid.UUID {
+func (kernel *Kernel) ListWorkflows() []uuid.UUID {
 	return nil
 }
 
-func (engine *Engine) Shutdown() {
+func (kernel *Kernel) Shutdown() {
 }
 
 func main() {
@@ -480,6 +480,7 @@ func main() {
 		app          = kingpin.New("myapp", "A workflow engine")
 		queueSize    = app.Flag("queue-size", "Submission queue size").Default("1000").Int()
 		concurrentWf = app.Flag("concurrent-workflows", "Number of workflows").Default("1000").Int()
+		logPath      = app.Flag("log", "Path to write logs").Default("maple.log").String()
 		restart      = app.Command("restart", "Restart workflows")
 		run          = app.Command("run", "Run workflows")
 		runGraph     = run.Arg("wdl", "Graph file").Required().String()
@@ -488,8 +489,8 @@ func main() {
 	)
 
 	args, err := app.Parse(os.Args[1:])
-	log := NewLogger().ToFile("myapp.log").ToWriter(os.Stdout)
-	engine := NewEngine(log, "sqlite3", "DB", *concurrentWf, *queueSize)
+	log := NewLogger().ToFile(*logPath).ToWriter(os.Stdout)
+	engine := NewKernel(log, "sqlite3", "DB", *concurrentWf, *queueSize)
 
 	switch kingpin.MustParse(args, err) {
 	case restart.FullCommand():
