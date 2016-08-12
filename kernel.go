@@ -57,14 +57,6 @@ type WorkflowContext struct {
 	calls      []*JobContext
 }
 
-func (c WorkflowContext) id() uuid.UUID {
-	return c.uuid
-}
-
-func (c WorkflowContext) dbKey() int64 {
-	return c.primaryKey
-}
-
 func (s WorkflowSources) String() string {
 	return fmt.Sprintf("<workflow %s>", s.wdl)
 }
@@ -186,14 +178,14 @@ func (wd *WorkflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResult
 	var jobMutex sync.Mutex
 	var jobDone = make(chan *JobContext)
 	var workflowDone = make(chan bool)
-	var calls = make(chan *Node, 20)
+	var runnableJobs = make(chan *JobContext, 20)
 	var isAborting = false
-	var doneCalls = make(chan *JobContext)
+	var doneJobs = make(chan *JobContext)
 
 	defer func() {
 		wfCtx.done <- wfCtx
 		close(wfCtx.done)
-		close(doneCalls)
+		close(doneJobs)
 		workflowResultsChannel <- wfCtx
 	}()
 
@@ -209,10 +201,16 @@ func (wd *WorkflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResult
 		reader := strings.NewReader(wfCtx.source.wdl)
 		graph := LoadGraph(reader)
 		for _, root := range graph.Root() {
-			calls <- root
+			// TODO: duplicated code from below
+			job, err := wd.db.NewJob(wfCtx, root, log)
+			if err != nil {
+				// TODO: don't panic
+				panic(err)
+			}
+			runnableJobs <- job
 		}
 
-		for call := range doneCalls {
+		for call := range doneJobs {
 			wfCtx.calls = append(wfCtx.calls, call)
 
 			jobMutex.Lock()
@@ -223,8 +221,15 @@ func (wd *WorkflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResult
 				workflowDone <- true
 				return
 			} else if !isAborting {
-				for _, nextCall := range graph.Downstream(call.node) {
-					calls <- nextCall
+				for _, nextNode := range graph.Downstream(call.node) {
+					// TODO: check if this job already exists in DB.
+					// If so, then don't create a new one in the DB
+					job, err := wd.db.NewJob(wfCtx, nextNode, log)
+					if err != nil {
+						// TODO: don't panic
+						panic(err)
+					}
+					runnableJobs <- job
 				}
 			}
 		}
@@ -241,22 +246,16 @@ func (wd *WorkflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResult
 				return
 			case call := <-jobDone:
 				log.Info("workflow: subprocess finished: %s", call.status)
-				doneCalls <- call
+				doneJobs <- call
 			}
 		} else {
 			select {
-			case call := <-calls:
-				log.Info("workflow: launching call: %s", call)
+			case job := <-runnableJobs:
+				log.Info("workflow: launching call: %s", job.node.String())
 				jobMutex.Lock()
 				jobCtx, cancel := context.WithCancel(context.Background())
-				job, err := wd.db.NewJob(wfCtx, call, log)
 				job.cancel = cancel
 				jobs[job] = struct{}{}
-
-				if err != nil {
-					// TODO: don't panic!
-					panic(fmt.Sprintf("Couldn't persist job: %s", err))
-				}
 				go wd.runJob(wfCtx, exec.Command("sleep", "2"), job, jobDone, jobCtx)
 				jobMutex.Unlock()
 			case <-workflowDone:
@@ -265,7 +264,7 @@ func (wd *WorkflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResult
 				return
 			case call := <-jobDone:
 				log.Info("workflow: subprocess finished: %s", call.status)
-				doneCalls <- call
+				doneJobs <- call
 			case <-ctx.Done():
 				// this is for cancellations AND timeouts
 				log.Info("workflow: aborting...")
