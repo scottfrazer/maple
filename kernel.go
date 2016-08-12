@@ -178,7 +178,7 @@ func (wd *WorkflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResult
 	var jobMutex sync.Mutex
 	var jobDone = make(chan *JobContext)
 	var workflowDone = make(chan bool)
-	var runnableJobs = make(chan *JobContext, 20)
+	var runnableJobs = make(chan *JobContext)
 	var isAborting = false
 	var doneJobs = make(chan *JobContext)
 
@@ -210,27 +210,29 @@ func (wd *WorkflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResult
 			runnableJobs <- job
 		}
 
-		for call := range doneJobs {
-			wfCtx.calls = append(wfCtx.calls, call)
+		for doneJob := range doneJobs {
+			wfCtx.calls = append(wfCtx.calls, doneJob)
 
 			jobMutex.Lock()
-			delete(jobs, call)
+			delete(jobs, doneJob)
 			jobMutex.Unlock()
 
 			if len(wfCtx.calls) == len(graph.nodes) || (isAborting && len(jobs) == 0) {
 				workflowDone <- true
 				return
 			} else if !isAborting {
-				for _, nextNode := range graph.Downstream(call.node) {
-					// TODO: check if this job already exists in DB.
-					// If so, then don't create a new one in the DB
-					job, err := wd.db.NewJob(wfCtx, nextNode, log)
-					if err != nil {
-						// TODO: don't panic
-						panic(err)
+				go func() {
+					for _, nextNode := range graph.Downstream(doneJob.node) {
+						// TODO: check if this job already exists in DB.
+						// If so, then don't create a new one in the DB
+						job, err := wd.db.NewJob(wfCtx, nextNode, log)
+						if err != nil {
+							// TODO: don't panic
+							panic(err)
+						}
+						runnableJobs <- job
 					}
-					runnableJobs <- job
-				}
+				}()
 			}
 		}
 	}()
