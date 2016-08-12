@@ -1,0 +1,126 @@
+	+------------------------------------------------+
+	| Cli                                            |
+	+------------------------------------------------+
+                            | ^
+                            V |
++---+------------------------------------------------+
+|   | Http                                           |
+|   +------------------------------------------------+
+| L | Kernel                                         |
+| o +-----------------------+------------------------+  $ maple server
+| g | Database              | Backend (+ Filesystem) |
+|   +-----------------------+------------------------+
+|   |                       | UNIX proc / AWS Job    |
++---+                       +------------------------+
+
+
+
+
+Kernel (kernel.go)
+======
+
+The Kernel API will be a Go-only API that will allow submission, manipulation, and querying workflows.
+
+The Kernel will be the only thing that has access to the Database layer.  Kernel should allow only non-destructive type pass-through functions, like GetWorkflowStatus(), but not SetWorkflowStatus(), and perhaps some minor repackaging of data (e.g. SnapshotOf() returning a *WorkflowContext)
+
+NewKernel(settings...) *Kernel
+kernel.Run(wdl, inputs, options string) *WorkflowContext // returns when workflow finishes
+kernel.Submit(...) uuid // same as above, but returns quick once it's scheduled.
+kernel.SnapshotOf(uuid) *WorkflowContext
+kernel.Abort(uuid)
+kernel.AbortCall(uuid, fqn string)
+kernel.List() []uuid
+
+States: Submitted -> Running -> [Aborted|Done|Failed]
+
+On Startup (always):
+
+* Check database state, fix anything weird (maybe server was shutdown prematurely)
+* Handle workflow FIFOs... maybe just reconnect to them, maybe remove them
+
+Database (db.go)
+========
+
+NewMapleDb(settings...) *MapleDb
+
+db.GetJobStatus()
+db.NewWorkflow()
+db.NewJob()
+db.SetWorkflowStatus()
+
+Backend
+=======
+
+ONE backend per workflow.  Backend and filesystem are married.  Backends are identified by strings like "SGE+unixfs", "GCE", "AWS", "local".  Backends need to know how to return Readers and Writers for all files
+
+Optionally, some tasks can be run inline (locally), but only if certain criteria are met:
+
+1) No File inputs/outputs
+
+interface MapleBackend {
+  	Run(cmd, fqn string) handle
+  	Abort(h handle)
+}
+
+interface WdlFile {
+	Read(p []byte) (n int, err error)
+	Write(p []byte) (n int, err error)
+}
+
+NewLocalBackend(wf *WorkflowContext, settings...) *MapleBackend
+backend.DbInit() error
+backend.Run(job *JobContext) handle
+backend.Abort(h handle)
+backend.Results(h handle) []*WdlFile
+backend.Status(h handle) string
+backend.Wait(h handle)
+backend.JobFile(job *JobContext, relpath string) *WdlFile
+backend.File(abspath string) *WdlFile
+
+Filesystem
+==========
+
+NewUnixFs(path) *FileSystem
+NewGcsFs(path) *FileSystem
+
+fs.
+
+Command Line (cli.go)
+============
+
+$ maple submit foo.wdl foo.inputs
+cefd19cb-a8b1-474d-bf58-9c4522a5af98
+(Sends POST /submit)
+
+$ maple tail cefd19cb
+... tailed log lines ...
+(Sends GET /fifo/cefd19cb)
+
+$ maple run foo.wdl foo.inputs
+(= submit + tail)
+
+$ maple ls
+cefd19cb    foo.wdl		running			2016-08-10T01:39:32+00:00
+93453875    bar.wdl		submitted		2016-08-10T01:39:32+00:00
+9ce50dbf    baz.wdl		completed		2016-08-10T01:39:32+00:00
+(Sends GET /list)
+
+$ maple show 93453875
+w.a 			running		local 		2016-08-10T01:39:32+00:00
+w.b 			running		local 		2016-08-10T01:39:32+00:00
+w.$scatter_0 	completed	-	 		2016-08-10T01:39:32+00:00
+(Sends GET /show/93453875)
+
+$ maple abort cefd19cb
+(Sends POST /abort/cefd19cb)
+
+$ maple server --port=8765
+
+HTTP API (http.go)
+========
+
+POST /submit
+GET /fifo/:uuid
+GET /list
+GET /show/:uuid
+POST /abort/:uuid
