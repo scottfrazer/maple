@@ -290,7 +290,7 @@ func (wd *workflowDispatcher) runDispatcher(ctx context.Context) {
 	}
 }
 
-func NewWorkflowDispatcher(workers int, buffer int, log *Logger, db *MapleDb) *workflowDispatcher {
+func newWorkflowDispatcher(workers int, buffer int, log *Logger, db *MapleDb) *workflowDispatcher {
 	var waitGroup sync.WaitGroup
 	var mutex sync.Mutex
 	dispatcherCtx, dispatcherCancel := context.WithCancel(context.Background())
@@ -314,22 +314,16 @@ func NewWorkflowDispatcher(workers int, buffer int, log *Logger, db *MapleDb) *w
 	return wd
 }
 
-func (wd *workflowDispatcher) Abort() {
+func (wd *workflowDispatcher) abort() {
 	if !wd.isAlive {
 		return
 	}
 	wd.cancel()
-	wd.Wait()
+	wd.wait()
 }
 
-func (wd *workflowDispatcher) Wait() {
+func (wd *workflowDispatcher) wait() {
 	wd.waitGroup.Wait()
-}
-
-func (wd *workflowDispatcher) IsAlive() bool {
-	wd.submitChannelMutex.Lock()
-	defer wd.submitChannelMutex.Unlock()
-	return wd.isAlive
 }
 
 func (wd *workflowDispatcher) SubmitWorkflow(wdl, inputs, options string, id uuid.UUID, timeout time.Duration) (*WorkflowContext, error) {
@@ -368,7 +362,7 @@ func SignalHandler(wd *workflowDispatcher) {
 	go func(wd *workflowDispatcher) {
 		sig := <-sigs
 		wd.log.Info("%s signal detected... aborting dispatcher", sig)
-		wd.Abort()
+		wd.abort()
 		wd.log.Info("%s signal detected... aborted dispatcher", sig)
 		os.Exit(130)
 	}(wd)
@@ -382,7 +376,7 @@ type Kernel struct {
 
 func NewKernel(log *Logger, dbName string, dbConnection string, concurrentWorkflows int, submitQueueSize int) *Kernel {
 	db := NewMapleDb(dbName, dbConnection, log)
-	wd := NewWorkflowDispatcher(concurrentWorkflows, submitQueueSize, log, db)
+	wd := newWorkflowDispatcher(concurrentWorkflows, submitQueueSize, log, db)
 	SignalHandler(wd)
 	return &Kernel{wd, log, db}
 }
