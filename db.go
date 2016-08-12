@@ -186,7 +186,7 @@ func (dsp *MapleDb) NewJob(wfCtx *WorkflowContext, node *Node, log *Logger) (*Jo
 		return nil, errors.New("could not insert into 'job_status' table")
 	}
 
-	ctx := JobContext{jobId, node, 0, 1, "NotStarted"}
+	ctx := JobContext{jobId, node, 0, 1, "NotStarted", func() {}}
 	success = true
 	return &ctx, nil
 }
@@ -323,27 +323,28 @@ func (dsp *MapleDb) LoadWorkflow(uuid uuid.UUID, log *Logger) (*WorkflowContext,
 	return dsp._LoadWorkflowSources(log, &context, context.primaryKey)
 }
 
-func (dsp *MapleDb) SetWorkflowStatus(wfId WorkflowIdentifier, status string, log *Logger) (bool, error) {
+func (dsp *MapleDb) SetWorkflowStatus(wfCtx *WorkflowContext, status string, log *Logger) (bool, error) {
 	dsp.mtx.Lock()
 	defer dsp.mtx.Unlock()
 	db := dsp.db
 	var nowISO8601 = time.Now().Format("2006-01-02 15:04:05.999")
 	var query = `INSERT INTO workflow_status (workflow_id, status, date) VALUES (?, ?, ?)`
-	log.DbQuery(query, strconv.FormatInt(wfId.dbKey(), 10), status, nowISO8601)
-	_, err := db.Exec(query, wfId.dbKey(), status, nowISO8601)
+	log.DbQuery(query, strconv.FormatInt(wfCtx.primaryKey, 10), status, nowISO8601)
+	_, err := db.Exec(query, wfCtx.primaryKey, status, nowISO8601)
 	if err != nil {
 		return false, err
 	}
+	wfCtx.status = status
 	return true, nil
 }
 
-func (dsp *MapleDb) GetWorkflowStatus(wfId WorkflowIdentifier, log *Logger) (string, error) {
+func (dsp *MapleDb) GetWorkflowStatus(wfCtx *WorkflowContext, log *Logger) (string, error) {
 	dsp.mtx.Lock()
 	defer dsp.mtx.Unlock()
 	db := dsp.db
 	var query = `SELECT status FROM workflow_status WHERE workflow_id=? ORDER BY datetime(date) DESC, id DESC LIMIT 1`
-	log.DbQuery(query, strconv.FormatInt(wfId.dbKey(), 10))
-	row := db.QueryRow(query, wfId.dbKey())
+	log.DbQuery(query, strconv.FormatInt(wfCtx.primaryKey, 10))
+	row := db.QueryRow(query, wfCtx.primaryKey)
 	var status string
 	err := row.Scan(&status)
 	if err != nil {
@@ -396,11 +397,11 @@ func (dsp *MapleDb) GetWorkflowsByStatus(log *Logger, status ...string) ([]*Work
 	return contexts, nil
 }
 
-func (dsp *MapleDb) _GetWorkflowStatus(log *Logger, wfId WorkflowIdentifier) (string, error) {
+func (dsp *MapleDb) _GetWorkflowStatus(log *Logger, wfCtx *WorkflowContext) (string, error) {
 	db := dsp.db
 	var query = `SELECT status FROM workflow_status WHERE workflow_id=? ORDER BY datetime(date) DESC, id DESC LIMIT 1`
-	log.DbQuery(query, strconv.FormatInt(wfId.dbKey(), 10))
-	row := db.QueryRow(query, wfId.dbKey())
+	log.DbQuery(query, strconv.FormatInt(wfCtx.primaryKey, 10))
+	row := db.QueryRow(query, wfCtx.primaryKey)
 	var status string
 	err := row.Scan(&status)
 	if err != nil {

@@ -1,4 +1,4 @@
 clean:
-	-rm DB kernel maple.log
+	-rm DB maple maple.log
 compile:
-	go build kernel.go db.go log.go parse.go
+	go build

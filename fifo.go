@@ -67,7 +67,7 @@ func (fifo *NonBlockingFifo) Close() {
 	os.Remove(fifo.path)
 }
 
-func main() {
+func main3() {
 	if os.Args[1] == "client" {
 		if os.Args[2] == "submit" {
 			resp, err := http.Get("http://localhost:8765/submit")

@@ -87,16 +87,3 @@ func LoadGraph(reader io.Reader) *Graph {
 	}
 	return &graph
 }
-
-func main2() {
-	reader := strings.NewReader(`
-[1]A[2]
-[1]B[3,4]
-[1]C[2]
-[1]D[1]
-[D,1]E[]
-[D]F[0]
-[F]G[]`)
-	g := LoadGraph(reader)
-	fmt.Println(g.Find("A"))
-}

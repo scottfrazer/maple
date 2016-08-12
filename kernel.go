@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"github.com/satori/go.uuid"
 	"golang.org/x/net/context"
-	"gopkg.in/alecthomas/kingpin.v2"
 	"io"
 	"io/ioutil"
 	"net/http"
@@ -30,11 +29,6 @@ type WorkflowDispatcher struct {
 	log                *Logger
 }
 
-type WorkflowIdentifier interface {
-	dbKey() int64
-	id() uuid.UUID
-}
-
 type WorkflowSources struct {
 	wdl     string
 	inputs  string
@@ -47,6 +41,7 @@ type JobContext struct {
 	index      int
 	attempt    int
 	status     string
+	cancel     func()
 }
 
 func (ctx *JobContext) String() string {
@@ -185,14 +180,11 @@ func (wd *WorkflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResult
 
 	log.Info("runWorkflow: start")
 
-	// TODO: push these two lines into SetWorkflowStatus()
 	wd.db.SetWorkflowStatus(wfCtx, "Started", log)
-	wfCtx.status = "Started"
 
+	var jobs = make(map[*JobContext]struct{})
+	var jobMutex sync.Mutex
 	var jobDone = make(chan *JobContext)
-	// TODO: get rid of jobAbort, set the cancellation function on the JobContext
-	var jobAbort = make(map[*Node]func())
-	var jobAbortMutex sync.Mutex
 	var workflowDone = make(chan bool)
 	var calls = make(chan *Node, 20)
 	var isAborting = false
@@ -205,12 +197,11 @@ func (wd *WorkflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResult
 		workflowResultsChannel <- wfCtx
 	}()
 
-	var abortSubprocesses = func() {
-		for _, jobCloseFunc := range jobAbort {
-			jobCloseFunc()
+	var abortJobs = func() {
+		for job, _ := range jobs {
+			job.cancel()
 		}
 		wd.db.SetWorkflowStatus(wfCtx, "Aborted", log)
-		wfCtx.status = "Aborted"
 		isAborting = true
 	}
 
@@ -224,11 +215,11 @@ func (wd *WorkflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResult
 		for call := range doneCalls {
 			wfCtx.calls = append(wfCtx.calls, call)
 
-			jobAbortMutex.Lock()
-			delete(jobAbort, call.node)
-			jobAbortMutex.Unlock()
+			jobMutex.Lock()
+			delete(jobs, call)
+			jobMutex.Unlock()
 
-			if len(wfCtx.calls) == len(graph.nodes) || (isAborting && len(jobAbort) == 0) {
+			if len(wfCtx.calls) == len(graph.nodes) || (isAborting && len(jobs) == 0) {
 				workflowDone <- true
 				return
 			} else if !isAborting {
@@ -245,7 +236,6 @@ func (wd *WorkflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResult
 			case <-workflowDone:
 				log.Info("workflow: completed")
 				if wfCtx.status != "Aborted" {
-					wfCtx.status = "Done"
 					wd.db.SetWorkflowStatus(wfCtx, "Done", log)
 				}
 				return
@@ -257,19 +247,20 @@ func (wd *WorkflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResult
 			select {
 			case call := <-calls:
 				log.Info("workflow: launching call: %s", call)
-				jobAbortMutex.Lock()
+				jobMutex.Lock()
 				jobCtx, cancel := context.WithCancel(context.Background())
-				jobAbort[call] = cancel
 				job, err := wd.db.NewJob(wfCtx, call, log)
+				job.cancel = cancel
+				jobs[job] = struct{}{}
+
 				if err != nil {
 					// TODO: don't panic!
 					panic(fmt.Sprintf("Couldn't persist job: %s", err))
 				}
 				go wd.runJob(wfCtx, exec.Command("sleep", "2"), job, jobDone, jobCtx)
-				jobAbortMutex.Unlock()
+				jobMutex.Unlock()
 			case <-workflowDone:
 				log.Info("workflow: completed")
-				wfCtx.status = "Done"
 				wd.db.SetWorkflowStatus(wfCtx, "Done", log)
 				return
 			case call := <-jobDone:
@@ -278,14 +269,14 @@ func (wd *WorkflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResult
 			case <-ctx.Done():
 				// this is for cancellations AND timeouts
 				log.Info("workflow: aborting...")
-				abortSubprocesses()
+				abortJobs()
 
-				jobAbortMutex.Lock()
-				if len(jobAbort) == 0 {
-					jobAbortMutex.Unlock()
+				jobMutex.Lock()
+				if len(jobs) == 0 {
+					jobMutex.Unlock()
 					return
 				}
-				jobAbortMutex.Unlock()
+				jobMutex.Unlock()
 			}
 		}
 	}
@@ -472,67 +463,4 @@ func (kernel *Kernel) ListWorkflows() []uuid.UUID {
 }
 
 func (kernel *Kernel) Shutdown() {
-}
-
-func main() {
-
-	var (
-		app          = kingpin.New("myapp", "A workflow engine")
-		queueSize    = app.Flag("queue-size", "Submission queue size").Default("1000").Int()
-		concurrentWf = app.Flag("concurrent-workflows", "Number of workflows").Default("1000").Int()
-		logPath      = app.Flag("log", "Path to write logs").Default("maple.log").String()
-		restart      = app.Command("restart", "Restart workflows")
-		run          = app.Command("run", "Run workflows")
-		runGraph     = run.Arg("wdl", "Graph file").Required().String()
-		runN         = run.Arg("count", "Number of instances").Required().Int()
-		server       = app.Command("server", "Start HTTP server")
-	)
-
-	args, err := app.Parse(os.Args[1:])
-	log := NewLogger().ToFile(*logPath).ToWriter(os.Stdout)
-	engine := NewKernel(log, "sqlite3", "DB", *concurrentWf, *queueSize)
-
-	switch kingpin.MustParse(args, err) {
-	case restart.FullCommand():
-		restartableWorkflows, _ := engine.db.GetWorkflowsByStatus(log, "Aborted", "NotStarted", "Started")
-		var restartWg sync.WaitGroup
-		for _, restartableWfContext := range restartableWorkflows {
-			fmt.Printf("restarting %s\n", restartableWfContext.uuid)
-			restartWg.Add(1)
-			go func(ctx *WorkflowContext) {
-				engine.wd.SubmitExistingWorkflow(ctx)
-				<-ctx.done
-				restartWg.Done()
-			}(restartableWfContext)
-		}
-		restartWg.Wait()
-	case run.FullCommand():
-		var wg sync.WaitGroup
-		for i := 0; i < *runN; i++ {
-			wg.Add(1)
-			go func() {
-				contents, err := ioutil.ReadFile(*runGraph)
-				if err != nil {
-					// TODO: don't panic
-					panic(err)
-				}
-
-				id := uuid.NewV4()
-				ctx := engine.RunWorkflow(string(contents), "inputs", "options", id)
-				if ctx != nil {
-					engine.log.Info("Workflow Complete: %s (status %s)", id, ctx.status)
-				} else {
-					engine.log.Info("Workflow Incomplete")
-				}
-				wg.Done()
-			}()
-		}
-		wg.Wait()
-	case server.FullCommand():
-		log.Info("Listening on :8000 ...")
-		http.HandleFunc("/submit", SubmitHttpEndpoint(engine.wd))
-		http.ListenAndServe(":8000", nil)
-	}
-
-	engine.wd.Abort()
 }
