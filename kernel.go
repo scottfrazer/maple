@@ -5,9 +5,6 @@ import (
 	"fmt"
 	"github.com/satori/go.uuid"
 	"golang.org/x/net/context"
-	"io"
-	"io/ioutil"
-	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -17,7 +14,7 @@ import (
 	"time"
 )
 
-type WorkflowDispatcher struct {
+type workflowDispatcher struct {
 	isAlive            bool
 	maxWorkers         int
 	submitChannel      chan *WorkflowContext
@@ -61,64 +58,7 @@ func (s WorkflowSources) String() string {
 	return fmt.Sprintf("<workflow %s>", s.wdl)
 }
 
-func SubmitHttpEndpoint(wd *WorkflowDispatcher) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		fp, _, err := r.FormFile("wdl")
-		if err != nil {
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			w.WriteHeader(http.StatusBadRequest)
-			io.WriteString(w, `{"message": "no WDL file"}`)
-			return
-		}
-
-		var bytes, _ = ioutil.ReadAll(fp)
-		wdl := string(bytes)
-
-		fp, _, err = r.FormFile("inputs")
-		var inputs = "{}"
-		if err != nil {
-			bytes, _ = ioutil.ReadAll(fp)
-			inputs = string(bytes)
-		}
-
-		fp, _, err = r.FormFile("options")
-		var options = "{}"
-		if err != nil {
-			bytes, _ = ioutil.ReadAll(fp)
-			options = string(bytes)
-		}
-
-		sources := WorkflowSources{strings.TrimSpace(wdl), strings.TrimSpace(inputs), strings.TrimSpace(options)}
-		uuid := uuid.NewV4()
-		ctx, err := wd.db.NewWorkflow(uuid, &sources, wd.log)
-		if err != nil {
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			w.WriteHeader(http.StatusInternalServerError)
-			io.WriteString(w, fmt.Sprintf(`{"message": "could not persist worflow"}`, r))
-			return
-		}
-
-		wd.log.Info("HTTP endpoint /submit/ received: %s\n", sources)
-		defer func() {
-			if r := recover(); r != nil {
-				w.Header().Set("Content-Type", "application/json; charset=utf-8")
-				w.WriteHeader(http.StatusInternalServerError)
-				io.WriteString(w, fmt.Sprintf(`{"message": "/submit/ panic: %s"}`, r))
-			}
-		}()
-
-		select {
-		case wd.submitChannel <- ctx:
-		case <-time.After(time.Millisecond * 500):
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			w.WriteHeader(http.StatusRequestTimeout)
-			io.WriteString(w, `{"message": "timeout submitting workflow (500ms)"}`)
-			return
-		}
-	}
-}
-
-func (wd *WorkflowDispatcher) runJob(wfCtx *WorkflowContext, cmd *exec.Cmd, callCtx *JobContext, done chan<- *JobContext, jobCtx context.Context) {
+func (wd *workflowDispatcher) runJob(wfCtx *WorkflowContext, cmd *exec.Cmd, callCtx *JobContext, done chan<- *JobContext, jobCtx context.Context) {
 	var cmdDone = make(chan bool, 1)
 	var log = wd.log.ForJob(wfCtx.uuid, callCtx)
 	var isAborting = false
@@ -167,7 +107,7 @@ func (wd *WorkflowDispatcher) runJob(wfCtx *WorkflowContext, cmd *exec.Cmd, call
 	}
 }
 
-func (wd *WorkflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResultsChannel chan<- *WorkflowContext, ctx context.Context) {
+func (wd *workflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResultsChannel chan<- *WorkflowContext, ctx context.Context) {
 	var log = wd.log.ForWorkflow(wfCtx.uuid)
 
 	log.Info("runWorkflow: start")
@@ -283,7 +223,7 @@ func (wd *WorkflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResult
 	}
 }
 
-func (wd *WorkflowDispatcher) runDispatcher(ctx context.Context) {
+func (wd *workflowDispatcher) runDispatcher(ctx context.Context) {
 	var workers = 0
 	var isAborting = false
 	var workflowDone = make(chan *WorkflowContext)
@@ -350,7 +290,7 @@ func (wd *WorkflowDispatcher) runDispatcher(ctx context.Context) {
 	}
 }
 
-func NewWorkflowDispatcher(workers int, buffer int, log *Logger, db *MapleDb) *WorkflowDispatcher {
+func NewWorkflowDispatcher(workers int, buffer int, log *Logger, db *MapleDb) *workflowDispatcher {
 	var waitGroup sync.WaitGroup
 	var mutex sync.Mutex
 	dispatcherCtx, dispatcherCancel := context.WithCancel(context.Background())
@@ -358,7 +298,7 @@ func NewWorkflowDispatcher(workers int, buffer int, log *Logger, db *MapleDb) *W
 	mutex.Lock()
 	defer mutex.Unlock()
 
-	wd := &WorkflowDispatcher{
+	wd := &workflowDispatcher{
 		true,
 		workers,
 		make(chan *WorkflowContext, buffer),
@@ -374,7 +314,7 @@ func NewWorkflowDispatcher(workers int, buffer int, log *Logger, db *MapleDb) *W
 	return wd
 }
 
-func (wd *WorkflowDispatcher) Abort() {
+func (wd *workflowDispatcher) Abort() {
 	if !wd.isAlive {
 		return
 	}
@@ -382,46 +322,50 @@ func (wd *WorkflowDispatcher) Abort() {
 	wd.Wait()
 }
 
-func (wd *WorkflowDispatcher) Wait() {
+func (wd *workflowDispatcher) Wait() {
 	wd.waitGroup.Wait()
 }
 
-func (wd *WorkflowDispatcher) IsAlive() bool {
+func (wd *workflowDispatcher) IsAlive() bool {
 	wd.submitChannelMutex.Lock()
 	defer wd.submitChannelMutex.Unlock()
 	return wd.isAlive
 }
 
-func (wd *WorkflowDispatcher) SubmitWorkflow(wdl, inputs, options string, id uuid.UUID) (*WorkflowContext, error) {
+func (wd *workflowDispatcher) SubmitWorkflow(wdl, inputs, options string, id uuid.UUID, timeout time.Duration) (*WorkflowContext, error) {
 	sources := WorkflowSources{strings.TrimSpace(wdl), strings.TrimSpace(inputs), strings.TrimSpace(options)}
 	log := wd.log.ForWorkflow(id)
 	ctx, err := wd.db.NewWorkflow(id, &sources, log)
 	if err != nil {
 		return nil, err
 	}
-	wd.SubmitExistingWorkflow(ctx)
+	wd.SubmitExistingWorkflow(ctx, timeout)
 	return ctx, nil
 }
 
-func (wd *WorkflowDispatcher) SubmitExistingWorkflow(ctx *WorkflowContext) error {
+func (wd *workflowDispatcher) SubmitExistingWorkflow(ctx *WorkflowContext, timeout time.Duration) error {
 	wd.submitChannelMutex.Lock()
 	defer wd.submitChannelMutex.Unlock()
 	if wd.isAlive == true {
-		wd.submitChannel <- ctx
+		select {
+		case wd.submitChannel <- ctx:
+		case <-time.After(timeout):
+			return errors.New("Timeout submitting workflow")
+		}
 	} else {
 		return errors.New("workflow submission is closed")
 	}
 	return nil
 }
 
-func (wd *WorkflowDispatcher) AbortWorkflow(id uuid.UUID) {
+func (wd *workflowDispatcher) AbortWorkflow(id uuid.UUID) {
 	return
 }
 
-func SignalHandler(wd *WorkflowDispatcher) {
+func SignalHandler(wd *workflowDispatcher) {
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-	go func(wd *WorkflowDispatcher) {
+	go func(wd *workflowDispatcher) {
 		sig := <-sigs
 		wd.log.Info("%s signal detected... aborting dispatcher", sig)
 		wd.Abort()
@@ -431,7 +375,7 @@ func SignalHandler(wd *WorkflowDispatcher) {
 }
 
 type Kernel struct {
-	wd  *WorkflowDispatcher
+	wd  *workflowDispatcher
 	log *Logger
 	db  *MapleDb
 }
@@ -443,16 +387,20 @@ func NewKernel(log *Logger, dbName string, dbConnection string, concurrentWorkfl
 	return &Kernel{wd, log, db}
 }
 
-func (kernel *Kernel) RunWorkflow(wdl, inputs, options string, id uuid.UUID) *WorkflowContext {
-	ctx, err := kernel.wd.SubmitWorkflow(wdl, inputs, options, id)
+func (kernel *Kernel) RunWorkflow(wdl, inputs, options string, id uuid.UUID) (*WorkflowContext, error) {
+	ctx, err := kernel.wd.SubmitWorkflow(wdl, inputs, options, id, time.Hour)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	return <-ctx.done
+	return <-ctx.done, nil
 }
 
-func (kernel *Kernel) SubmitWorkflow(wdl, inputs, options string, id uuid.UUID) *WorkflowContext {
-	return nil
+func (kernel *Kernel) SubmitWorkflow(wdl, inputs, options string, id uuid.UUID, timeout time.Duration) (*WorkflowContext, error) {
+	ctx, err := kernel.wd.SubmitWorkflow(wdl, inputs, options, id, timeout)
+	if err != nil {
+		return nil, err
+	}
+	return ctx, nil
 }
 
 func (kernel *Kernel) AbortWorkflow(uuid uuid.UUID) error {

@@ -121,6 +121,7 @@ $ maple server --port=8765
 HTTP API (http.go)
 ========
 
+GET /ping
 POST /submit
 GET /fifo/:uuid
 GET /list
