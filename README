@@ -39,7 +39,9 @@ On Startup (always):
 * Handle workflow FIFOs... maybe just reconnect to them, maybe remove them
 
 Database (db.go)
-========
+================
+
+Only called by the Kernel to persist data.
 
 NewMapleDb(settings...) *MapleDb
 
