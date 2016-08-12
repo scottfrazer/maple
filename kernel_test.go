@@ -23,7 +23,7 @@ func TestStartDispatcher(t *testing.T) {
 func TestCreateWorkflow(t *testing.T) {
 	var buf bytes.Buffer
 	log := NewLogger().ToWriter(&buf)
-	db := NewDatabaseDispatcher("sqlite3", "DBfortest", log)
+	db := NewMapleDb("sqlite3", "DBfortest", log)
 	ctx := db.NewWorkflow(uuid.NewV4(), &WorkflowSources{"wdl", "inputs", "options"}, log)
 	if db.GetWorkflowStatus(ctx, log) != "NotStarted" {
 		t.Fatalf("Expecting workflow in NotStarted state")

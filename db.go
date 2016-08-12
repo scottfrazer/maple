@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-type DatabaseDispatcher struct {
+type MapleDb struct {
 	driverName     string
 	dataSourceName string
 	log            *Logger
@@ -19,22 +19,22 @@ type DatabaseDispatcher struct {
 	mtx            *sync.Mutex
 }
 
-func NewDatabaseDispatcher(driverName, dataSourceName string, log *Logger) *DatabaseDispatcher {
+func NewMapleDb(driverName, dataSourceName string, log *Logger) *MapleDb {
 	db, err := sql.Open(driverName, dataSourceName)
 	if err != nil {
 		panic(err)
 	}
 	var mtx sync.Mutex
-	dsp := &DatabaseDispatcher{driverName, dataSourceName, log, db, &mtx}
+	dsp := &MapleDb{driverName, dataSourceName, log, db, &mtx}
 	dsp.setup()
 	return dsp
 }
 
-func (dsp *DatabaseDispatcher) Close() {
+func (dsp *MapleDb) Close() {
 	// TODO: close dsp.db
 }
 
-func (dsp *DatabaseDispatcher) tables() ([]string, error) {
+func (dsp *MapleDb) tables() ([]string, error) {
 	query := "SELECT name FROM sqlite_master WHERE type='table';"
 	dsp.log.DbQuery(query)
 	rows, err := dsp.db.Query(query)
@@ -61,7 +61,7 @@ func (dsp *DatabaseDispatcher) tables() ([]string, error) {
 	return tables, nil
 }
 
-func (dsp *DatabaseDispatcher) query(query string) {
+func (dsp *MapleDb) query(query string) {
 	dsp.log.DbQuery(query)
 	_, err := dsp.db.Exec(query)
 	if err != nil {
@@ -69,7 +69,7 @@ func (dsp *DatabaseDispatcher) query(query string) {
 	}
 }
 
-func (dsp *DatabaseDispatcher) setup() {
+func (dsp *MapleDb) setup() {
 	tableNames, err := dsp.tables()
 	if err != nil {
 		panic(err)
@@ -125,7 +125,7 @@ func (dsp *DatabaseDispatcher) setup() {
 	}
 }
 
-func (dsp *DatabaseDispatcher) NewJob(wfCtx *WorkflowContext, node *Node, log *Logger) (*JobContext, error) {
+func (dsp *MapleDb) NewJob(wfCtx *WorkflowContext, node *Node, log *Logger) (*JobContext, error) {
 	dsp.mtx.Lock()
 	defer dsp.mtx.Unlock()
 	db := dsp.db
@@ -191,7 +191,7 @@ func (dsp *DatabaseDispatcher) NewJob(wfCtx *WorkflowContext, node *Node, log *L
 	return &ctx, nil
 }
 
-func (dsp *DatabaseDispatcher) SetJobStatus(jobCtx *JobContext, status string, log *Logger) (bool, error) {
+func (dsp *MapleDb) SetJobStatus(jobCtx *JobContext, status string, log *Logger) (bool, error) {
 	dsp.mtx.Lock()
 	defer dsp.mtx.Unlock()
 	db := dsp.db
@@ -206,7 +206,7 @@ func (dsp *DatabaseDispatcher) SetJobStatus(jobCtx *JobContext, status string, l
 	return true, nil
 }
 
-func (dsp *DatabaseDispatcher) GetJobStatus(jobId int64, log *Logger) (string, error) {
+func (dsp *MapleDb) GetJobStatus(jobId int64, log *Logger) (string, error) {
 	dsp.mtx.Lock()
 	defer dsp.mtx.Unlock()
 	db := dsp.db
@@ -221,7 +221,7 @@ func (dsp *DatabaseDispatcher) GetJobStatus(jobId int64, log *Logger) (string, e
 	return status, nil
 }
 
-func (dsp *DatabaseDispatcher) NewWorkflow(uuid uuid.UUID, sources *WorkflowSources, log *Logger) (*WorkflowContext, error) {
+func (dsp *MapleDb) NewWorkflow(uuid uuid.UUID, sources *WorkflowSources, log *Logger) (*WorkflowContext, error) {
 	dsp.mtx.Lock()
 	defer dsp.mtx.Unlock()
 	db := dsp.db
@@ -303,7 +303,7 @@ func (dsp *DatabaseDispatcher) NewWorkflow(uuid uuid.UUID, sources *WorkflowSour
 	return &ctx, nil
 }
 
-func (dsp *DatabaseDispatcher) LoadWorkflow(uuid uuid.UUID, log *Logger) (*WorkflowContext, error) {
+func (dsp *MapleDb) LoadWorkflow(uuid uuid.UUID, log *Logger) (*WorkflowContext, error) {
 	dsp.mtx.Lock()
 	defer dsp.mtx.Unlock()
 	db := dsp.db
@@ -323,7 +323,7 @@ func (dsp *DatabaseDispatcher) LoadWorkflow(uuid uuid.UUID, log *Logger) (*Workf
 	return dsp._LoadWorkflowSources(log, &context, context.primaryKey)
 }
 
-func (dsp *DatabaseDispatcher) SetWorkflowStatus(wfId WorkflowIdentifier, status string, log *Logger) (bool, error) {
+func (dsp *MapleDb) SetWorkflowStatus(wfId WorkflowIdentifier, status string, log *Logger) (bool, error) {
 	dsp.mtx.Lock()
 	defer dsp.mtx.Unlock()
 	db := dsp.db
@@ -337,7 +337,7 @@ func (dsp *DatabaseDispatcher) SetWorkflowStatus(wfId WorkflowIdentifier, status
 	return true, nil
 }
 
-func (dsp *DatabaseDispatcher) GetWorkflowStatus(wfId WorkflowIdentifier, log *Logger) (string, error) {
+func (dsp *MapleDb) GetWorkflowStatus(wfId WorkflowIdentifier, log *Logger) (string, error) {
 	dsp.mtx.Lock()
 	defer dsp.mtx.Unlock()
 	db := dsp.db
@@ -352,7 +352,7 @@ func (dsp *DatabaseDispatcher) GetWorkflowStatus(wfId WorkflowIdentifier, log *L
 	return status, nil
 }
 
-func (dsp *DatabaseDispatcher) GetWorkflowsByStatus(log *Logger, status ...string) ([]*WorkflowContext, error) {
+func (dsp *MapleDb) GetWorkflowsByStatus(log *Logger, status ...string) ([]*WorkflowContext, error) {
 	dsp.mtx.Lock()
 	defer dsp.mtx.Unlock()
 	db := dsp.db
@@ -396,7 +396,7 @@ func (dsp *DatabaseDispatcher) GetWorkflowsByStatus(log *Logger, status ...strin
 	return contexts, nil
 }
 
-func (dsp *DatabaseDispatcher) _GetWorkflowStatus(log *Logger, wfId WorkflowIdentifier) (string, error) {
+func (dsp *MapleDb) _GetWorkflowStatus(log *Logger, wfId WorkflowIdentifier) (string, error) {
 	db := dsp.db
 	var query = `SELECT status FROM workflow_status WHERE workflow_id=? ORDER BY datetime(date) DESC, id DESC LIMIT 1`
 	log.DbQuery(query, strconv.FormatInt(wfId.dbKey(), 10))
@@ -409,7 +409,7 @@ func (dsp *DatabaseDispatcher) _GetWorkflowStatus(log *Logger, wfId WorkflowIden
 	return status, nil
 }
 
-func (dsp *DatabaseDispatcher) _LoadWorkflowPK(log *Logger, primaryKey int64) (*WorkflowContext, error) {
+func (dsp *MapleDb) _LoadWorkflowPK(log *Logger, primaryKey int64) (*WorkflowContext, error) {
 	db := dsp.db
 	var context WorkflowContext
 	context.primaryKey = primaryKey
@@ -425,7 +425,7 @@ func (dsp *DatabaseDispatcher) _LoadWorkflowPK(log *Logger, primaryKey int64) (*
 	return dsp._LoadWorkflowSources(log, &context, primaryKey)
 }
 
-func (dsp *DatabaseDispatcher) _LoadWorkflowSources(log *Logger, context *WorkflowContext, primaryKey int64) (*WorkflowContext, error) {
+func (dsp *MapleDb) _LoadWorkflowSources(log *Logger, context *WorkflowContext, primaryKey int64) (*WorkflowContext, error) {
 	db := dsp.db
 	var sources WorkflowSources
 	var err error

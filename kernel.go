@@ -25,7 +25,7 @@ type WorkflowDispatcher struct {
 	submitChannelMutex *sync.Mutex
 	cancel             func()
 	waitGroup          *sync.WaitGroup
-	db                 *DatabaseDispatcher
+	db                 *MapleDb
 	workflowMaxRuntime time.Duration
 	log                *Logger
 }
@@ -358,7 +358,7 @@ func (wd *WorkflowDispatcher) runDispatcher(ctx context.Context) {
 	}
 }
 
-func NewWorkflowDispatcher(workers int, buffer int, log *Logger, db *DatabaseDispatcher) *WorkflowDispatcher {
+func NewWorkflowDispatcher(workers int, buffer int, log *Logger, db *MapleDb) *WorkflowDispatcher {
 	var waitGroup sync.WaitGroup
 	var mutex sync.Mutex
 	dispatcherCtx, dispatcherCancel := context.WithCancel(context.Background())
@@ -441,11 +441,11 @@ func SignalHandler(wd *WorkflowDispatcher) {
 type Kernel struct {
 	wd  *WorkflowDispatcher
 	log *Logger
-	db  *DatabaseDispatcher
+	db  *MapleDb
 }
 
 func NewKernel(log *Logger, dbName string, dbConnection string, concurrentWorkflows int, submitQueueSize int) *Kernel {
-	db := NewDatabaseDispatcher(dbName, dbConnection, log)
+	db := NewMapleDb(dbName, dbConnection, log)
 	wd := NewWorkflowDispatcher(concurrentWorkflows, submitQueueSize, log, db)
 	SignalHandler(wd)
 	return &Kernel{wd, log, db}
