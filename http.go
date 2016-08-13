@@ -64,3 +64,29 @@ func pingHttpEndpoint(kernel *Kernel, version, gitHash string) http.HandlerFunc 
 		io.WriteString(w, fmt.Sprintf(`{"version": "maple %s", "hash": "%s", "uptime": "%s"}`, version, gitHash, kernel.Uptime()))
 	}
 }
+
+func abortHttpEndpoint(kernel *Kernel) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		id, err := uuid.FromString(r.URL.Query().Get("uuid"))
+
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusInternalServerError)
+			io.WriteString(w, fmt.Sprintf(`{"message": "/abort/: %s"}`, err))
+			return
+		}
+
+		err = kernel.AbortWorkflow(id)
+
+		// TODO: Error handling code is duplicated, here and above
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusInternalServerError)
+			io.WriteString(w, fmt.Sprintf(`{"message": "/abort/: %s"}`, err))
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+	}
+}

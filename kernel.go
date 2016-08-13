@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"fmt"
 	"github.com/satori/go.uuid"
 	"golang.org/x/net/context"
 	"os"
@@ -36,6 +35,7 @@ type WorkflowContext struct {
 	source     *WorkflowSources
 	status     string
 	calls      []*JobContext
+	cancel     func()
 }
 
 type workflowDispatcher struct {
@@ -43,6 +43,8 @@ type workflowDispatcher struct {
 	maxWorkers         int
 	submitChannel      chan *WorkflowContext
 	submitChannelMutex *sync.Mutex
+	abortChannel       chan *WorkflowContext
+	running            map[*WorkflowContext]struct{}
 	cancel             func()
 	waitGroup          *sync.WaitGroup
 	db                 *MapleDb
@@ -63,6 +65,8 @@ func newWorkflowDispatcher(workers int, buffer int, log *Logger, db *MapleDb) *w
 		workers,
 		make(chan *WorkflowContext, buffer),
 		&mutex,
+		make(chan *WorkflowContext),
+		make(map[*WorkflowContext]struct{}),
 		dispatcherCancel,
 		&waitGroup,
 		db,
@@ -86,7 +90,7 @@ func (wd *workflowDispatcher) runJob(wfCtx *WorkflowContext, cmd *exec.Cmd, call
 
 	go func() {
 		select {
-		case <-time.After(time.Second * 2):
+		case <-time.After(time.Second * 10):
 		case <-subprocessCtx.Done():
 		}
 		//cmd.Run()
@@ -243,8 +247,6 @@ func (wd *workflowDispatcher) runDispatcher(ctx context.Context) {
 	var workers = 0
 	var isAborting = false
 	var workflowDone = make(chan *WorkflowContext)
-	var workflowAbort = make(map[string]func())
-	var runningWorkflows = make(map[string]*WorkflowContext)
 	var log = wd.log
 
 	log.Info("dispatcher: enter")
@@ -260,21 +262,20 @@ func (wd *workflowDispatcher) runDispatcher(ctx context.Context) {
 		wd.submitChannelMutex.Unlock()
 
 		isAborting = true
-		for _, wfCancelFunc := range workflowAbort {
-			wfCancelFunc()
+		for wfCtx, _ := range wd.running {
+			wfCtx.cancel()
 		}
 	}
 
 	var processDone = func(result *WorkflowContext) {
 		log.Info("dispatcher: workflow %s finished: %s", result.uuid, result.status)
-		delete(workflowAbort, fmt.Sprintf("%s", result.uuid))
-		delete(runningWorkflows, fmt.Sprintf("%s", result.uuid))
+		delete(wd.running, result)
 		workers--
 	}
 
 	for {
 		if isAborting {
-			if len(runningWorkflows) == 0 {
+			if len(wd.running) == 0 {
 				return
 			}
 			select {
@@ -285,11 +286,17 @@ func (wd *workflowDispatcher) runDispatcher(ctx context.Context) {
 			select {
 			case wfContext := <-wd.submitChannel:
 				workers++
-				runningWorkflows[fmt.Sprintf("%s", wfContext.uuid)] = wfContext
-				workflowCtx, workflowCancel := context.WithTimeout(ctx, wd.workflowMaxRuntime)
-				workflowAbort[fmt.Sprintf("%s", wfContext.uuid)] = workflowCancel
+				wd.running[wfContext] = struct{}{}
+				subCtx, workflowCancel := context.WithTimeout(ctx, wd.workflowMaxRuntime)
+				wfContext.cancel = workflowCancel
 				log.Info("dispatcher: starting %s", wfContext.uuid)
-				go wd.runWorkflow(wfContext, workflowDone, workflowCtx)
+				go wd.runWorkflow(wfContext, workflowDone, subCtx)
+			case abortUuid := <-wd.abortChannel:
+				for context, _ := range wd.running {
+					if context.uuid == abortUuid.uuid {
+						context.cancel()
+					}
+				}
 			case d := <-workflowDone:
 				processDone(d)
 			case <-ctx.Done():
@@ -345,7 +352,12 @@ func (wd *workflowDispatcher) submitExistingWorkflow(ctx *WorkflowContext, timeo
 }
 
 func (wd *workflowDispatcher) abortWorkflow(id uuid.UUID) {
-	return
+	for context, _ := range wd.running {
+		if context.uuid == id {
+			wd.abortChannel <- context
+			<-context.done
+		}
+	}
 }
 
 func (wd *workflowDispatcher) signalHandler() {
@@ -390,7 +402,8 @@ func (kernel *Kernel) SubmitWorkflow(wdl, inputs, options string, id uuid.UUID, 
 	return ctx, nil
 }
 
-func (kernel *Kernel) AbortWorkflow(uuid uuid.UUID) error {
+func (kernel *Kernel) AbortWorkflow(id uuid.UUID) error {
+	kernel.wd.abortWorkflow(id)
 	return nil
 }
 
@@ -403,4 +416,5 @@ func (kernel *Kernel) Uptime() time.Duration {
 }
 
 func (kernel *Kernel) Shutdown() {
+	// Shutdown dispatcher, call db.Close()
 }

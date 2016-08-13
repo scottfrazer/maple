@@ -33,12 +33,21 @@ func main() {
 		runGraph     = run.Arg("wdl", "Graph file").Required().String()
 		server       = app.Command("server", "Start HTTP server")
 		ping         = app.Command("ping", "Send ping to Maple server")
+		abort        = app.Command("abort", "Send ping to Maple server")
+		abortUuid    = abort.Arg("uuid", "UUID of workflow to abort").Required().String()
 	)
 
 	kingpin.Version(Version)
 	args, err := app.Parse(os.Args[1:])
 
 	switch kingpin.MustParse(args, err) {
+	case abort.FullCommand():
+		resp, err := http.Get(fmt.Sprintf("http://%s/abort?uuid=%s", *host, *abortUuid))
+		if err != nil {
+			panic(err)
+		}
+		defer resp.Body.Close()
+		fmt.Printf(resp.Status)
 	case ping.FullCommand():
 		resp, err := http.Get(fmt.Sprintf("http://%s/ping", *host))
 		if err != nil {
@@ -109,6 +118,7 @@ func main() {
 
 		http.HandleFunc("/submit", submitHttpEndpoint(kernel))
 		http.HandleFunc("/ping", pingHttpEndpoint(kernel, Version, GitHash))
+		http.HandleFunc("/abort", abortHttpEndpoint(kernel))
 
 		logger.Info("Listening on %s ...", *host)
 		http.ListenAndServe(*host, nil)

@@ -298,7 +298,7 @@ func (dsp *MapleDb) NewWorkflow(uuid uuid.UUID, sources *WorkflowSources, log *L
 		return nil, errors.New("could not insert into 'workflow_status' table")
 	}
 
-	ctx := WorkflowContext{uuid, workflowId, make(chan *WorkflowContext, 1), sources, "NotStarted", nil}
+	ctx := WorkflowContext{uuid, workflowId, make(chan *WorkflowContext, 1), sources, "NotStarted", nil, func() {}}
 	success = true
 	return &ctx, nil
 }

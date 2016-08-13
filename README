@@ -21,7 +21,7 @@ Kernel (kernel.go)
 
 The Kernel API will be a Go-only API that will allow submission, manipulation, and querying workflows.
 
-The Kernel will be the only thing that has access to the Database layer.  Kernel should allow only non-destructive type pass-through functions, like GetWorkflowStatus(), but not SetWorkflowStatus(), and perhaps some minor repackaging of data (e.g. SnapshotOf() returning a *WorkflowContext)
+The Kernel is the only Maple API that's exported.  The Kernel will call into the Database layer.  Kernel should allow only non-destructive type pass-through functions, like GetWorkflowStatus(), but not SetWorkflowStatus(), and perhaps some minor repackaging of data (e.g. SnapshotOf() returning a *WorkflowContext)
 
 NewKernel(settings...) *Kernel
 kernel.Run(wdl, inputs, options string) *WorkflowContext // returns when workflow finishes
@@ -41,7 +41,7 @@ On Startup (always):
 Database (db.go)
 ================
 
-Only called by the Kernel to persist data.
+Only called by the Kernel to persist data.  Nothing exported
 
 NewMapleDb(settings...) *MapleDb
 
@@ -53,7 +53,7 @@ db.SetWorkflowStatus()
 Backend
 =======
 
-ONE backend per workflow.  Backend and filesystem are married.  Backends are identified by strings like "SGE+unixfs", "GCE", "AWS", "local".  Backends need to know how to return Readers and Writers for all files
+ONE backend per workflow.  Backend and filesystem are married.  Backends are identified by strings like "SGE+unixfs", "GCE", "AWS", "local".  Backends need to know how to return Readers and Writers for all files.  A backend is instantiated per workflow invocation so it can take advantage of workflow options
 
 Optionally, some tasks can be run inline (locally), but only if certain criteria are met:
 
@@ -115,6 +115,9 @@ w.$scatter_0 	completed	-	 		2016-08-10T01:39:32+00:00
 
 $ maple abort cefd19cb
 (Sends POST /abort/cefd19cb)
+
+$ maple ping
+(Send GET /ping)
 
 $ maple server --port=8765
 
