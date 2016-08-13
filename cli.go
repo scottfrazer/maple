@@ -47,7 +47,7 @@ func main() {
 			panic(err)
 		}
 		defer resp.Body.Close()
-		fmt.Printf(resp.Status)
+		fmt.Println(resp.Status)
 	case ping.FullCommand():
 		resp, err := http.Get(fmt.Sprintf("http://%s/ping", *host))
 		if err != nil {

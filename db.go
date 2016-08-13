@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/satori/go.uuid"
 	"strconv"
@@ -437,6 +438,8 @@ func (dsp *MapleDb) _LoadWorkflowSources(log *Logger, context *WorkflowContext, 
 		return nil, err
 	}
 
+	/* Load Sources */
+
 	query := `SELECT wdl, inputs, options FROM workflow_sources WHERE workflow_id=?`
 	log.DbQuery(query, strconv.FormatInt(context.primaryKey, 10))
 	row := db.QueryRow(query, context.primaryKey)
@@ -445,6 +448,57 @@ func (dsp *MapleDb) _LoadWorkflowSources(log *Logger, context *WorkflowContext, 
 		return nil, err
 	}
 	context.source = &sources
+
+	/* Load Jobs */
+
+	query = `SELECT id, call_fqn, shard, attempt FROM job WHERE workflow_id=?`
+	log.DbQuery(query, strconv.FormatInt(context.primaryKey, 10))
+	rows, err := dsp.db.Query(query, context.primaryKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var jobs []*JobContext
+	for rows.Next() {
+		var job JobContext
+		err = rows.Scan(&job.primaryKey)
+		if err != nil {
+			return nil, err
+		}
+
+		var name string
+		graph := context.source.graph()
+		err = rows.Scan(&name)
+		if err != nil {
+			return nil, err
+		}
+		node := graph.Find(name)
+		if node == nil {
+			return nil, errors.New(fmt.Sprintf("Node name %s invalid", name))
+		}
+		job.node = node
+
+		err = rows.Scan(&job.shard)
+		if err != nil {
+			return nil, err
+		}
+
+		err = rows.Scan(&job.attempt)
+		if err != nil {
+			return nil, err
+		}
+
+		status, err := dsp.GetJobStatus(job.primaryKey, log)
+		if err != nil {
+			return nil, err
+		}
+		job.status = status
+
+		jobs = append(jobs, &job)
+	}
+
+	context.jobs = jobs
 
 	return context, nil
 }

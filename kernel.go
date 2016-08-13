@@ -17,12 +17,23 @@ type WorkflowSources struct {
 	wdl     string
 	inputs  string
 	options string
+	_graph  *Graph
+}
+
+func (sources *WorkflowSources) graph() *Graph {
+	if sources._graph != nil {
+		return sources._graph
+	}
+
+	reader := strings.NewReader(sources.wdl)
+	sources._graph = LoadGraph(reader)
+	return sources._graph
 }
 
 type JobContext struct {
 	primaryKey int64
 	node       *Node
-	index      int
+	shard      int
 	attempt    int
 	status     string
 	cancel     func()
@@ -34,8 +45,18 @@ type WorkflowContext struct {
 	done       chan *WorkflowContext
 	source     *WorkflowSources
 	status     string
-	calls      []*JobContext
+	jobs       []*JobContext
 	cancel     func()
+}
+
+func (ctx *WorkflowContext) jobsWithStatus(status string) []*JobContext {
+	var jobs []*JobContext
+	for _, job := range ctx.jobs {
+		if job.status == status {
+			jobs = append(jobs, job)
+		}
+	}
+	return jobs
 }
 
 type workflowDispatcher struct {
@@ -160,6 +181,8 @@ func (wd *workflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResult
 	go func() {
 		reader := strings.NewReader(wfCtx.source.wdl)
 		graph := LoadGraph(reader)
+
+		// TODO this is only for new workflows
 		for _, root := range graph.Root() {
 			// TODO: duplicated code from below
 			job, err := wd.db.NewJob(wfCtx, root, log)
@@ -171,13 +194,14 @@ func (wd *workflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResult
 		}
 
 		for doneJob := range doneJobs {
-			wfCtx.calls = append(wfCtx.calls, doneJob)
+			wfCtx.jobs = append(wfCtx.jobs, doneJob)
 
 			jobMutex.Lock()
 			delete(jobs, doneJob)
 			jobMutex.Unlock()
 
-			if len(wfCtx.calls) == len(graph.nodes) || (isAborting && len(jobs) == 0) {
+			// TODO wfCtx.
+			if len(wfCtx.jobs) == len(graph.nodes) || (isAborting && len(jobs) == 0) {
 				workflowDone <- true
 				return
 			} else if !isAborting {
@@ -326,7 +350,7 @@ func (wd *workflowDispatcher) wait() {
 }
 
 func (wd *workflowDispatcher) submitWorkflow(wdl, inputs, options string, id uuid.UUID, timeout time.Duration) (*WorkflowContext, error) {
-	sources := WorkflowSources{strings.TrimSpace(wdl), strings.TrimSpace(inputs), strings.TrimSpace(options)}
+	sources := WorkflowSources{strings.TrimSpace(wdl), strings.TrimSpace(inputs), strings.TrimSpace(options), nil}
 	log := wd.log.ForWorkflow(id)
 	ctx, err := wd.db.NewWorkflow(id, &sources, log)
 	if err != nil {
