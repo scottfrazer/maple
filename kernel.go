@@ -361,16 +361,17 @@ func (wd *workflowDispatcher) signalHandler() {
 }
 
 type Kernel struct {
-	wd  *workflowDispatcher
-	log *Logger
-	db  *MapleDb
+	wd    *workflowDispatcher
+	log   *Logger
+	db    *MapleDb
+	start time.Time
 }
 
 func NewKernel(log *Logger, dbName string, dbConnection string, concurrentWorkflows int, submitQueueSize int) *Kernel {
 	db := NewMapleDb(dbName, dbConnection, log)
 	wd := newWorkflowDispatcher(concurrentWorkflows, submitQueueSize, log, db)
 	wd.signalHandler()
-	return &Kernel{wd, log, db}
+	return &Kernel{wd, log, db, time.Now()}
 }
 
 func (kernel *Kernel) RunWorkflow(wdl, inputs, options string, id uuid.UUID) (*WorkflowContext, error) {
@@ -395,6 +396,10 @@ func (kernel *Kernel) AbortWorkflow(uuid uuid.UUID) error {
 
 func (kernel *Kernel) ListWorkflows() []uuid.UUID {
 	return nil
+}
+
+func (kernel *Kernel) Uptime() time.Duration {
+	return time.Since(kernel.start)
 }
 
 func (kernel *Kernel) Shutdown() {

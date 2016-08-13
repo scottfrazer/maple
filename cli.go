@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -18,17 +19,6 @@ var (
 	GitHash = "Unknown"
 )
 
-func ping(host string) {
-	resp, err := http.Get(fmt.Sprintf("http://%s/ping", host))
-	if err != nil {
-		panic(err)
-	}
-	defer resp.Body.Close()
-	body, err := ioutil.ReadAll(resp.Body)
-
-	fmt.Printf("PING %s\n", body)
-}
-
 func main() {
 
 	var (
@@ -42,14 +32,34 @@ func main() {
 		run          = app.Command("run", "Run workflows")
 		runGraph     = run.Arg("wdl", "Graph file").Required().String()
 		server       = app.Command("server", "Start HTTP server")
+		ping         = app.Command("ping", "Send ping to Maple server")
 	)
 
 	kingpin.Version(Version)
 	args, err := app.Parse(os.Args[1:])
 
 	switch kingpin.MustParse(args, err) {
+	case ping.FullCommand():
+		resp, err := http.Get(fmt.Sprintf("http://%s/ping", *host))
+		if err != nil {
+			panic(err)
+		}
+		defer resp.Body.Close()
+		body, err := ioutil.ReadAll(resp.Body)
+
+		var dat map[string]interface{}
+
+		if err := json.Unmarshal([]byte(body), &dat); err != nil {
+			panic(err)
+		}
+		version := dat["version"].(string)
+		hash := dat["hash"].(string)
+		uptime := dat["uptime"].(string)
+
+		fmt.Printf("Server version: %s\n", version)
+		fmt.Printf("Server Git hash: %s\n", hash)
+		fmt.Printf("Server uptime: %s\n", uptime)
 	case run.FullCommand():
-		ping(*host)
 		contents, err := ioutil.ReadFile(*runGraph)
 		if err != nil {
 			// TODO: don't panic.  here and below
@@ -94,11 +104,13 @@ func main() {
 
 		fmt.Println(string(respBody))
 	case server.FullCommand():
-		log := NewLogger().ToFile(*logPath).ToWriter(os.Stdout)
-		kernel := NewKernel(log, *dbDriver, *dbConnection, *concurrentWf, *queueSize)
-		log.Info("Listening on %s ...", *host)
+		logger := NewLogger().ToFile(*logPath).ToWriter(os.Stdout)
+		kernel := NewKernel(logger, *dbDriver, *dbConnection, *concurrentWf, *queueSize)
+
 		http.HandleFunc("/submit", submitHttpEndpoint(kernel))
 		http.HandleFunc("/ping", pingHttpEndpoint(kernel, Version, GitHash))
+
+		logger.Info("Listening on %s ...", *host)
 		http.ListenAndServe(*host, nil)
 	}
 }

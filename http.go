@@ -61,6 +61,6 @@ func pingHttpEndpoint(kernel *Kernel, version, gitHash string) http.HandlerFunc 
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
-		io.WriteString(w, fmt.Sprintf(`{"version": "maple %s", "hash": "%s"}`, version, gitHash))
+		io.WriteString(w, fmt.Sprintf(`{"version": "maple %s", "hash": "%s", "uptime": "%s"}`, version, gitHash, kernel.Uptime()))
 	}
 }
