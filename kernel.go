@@ -14,18 +14,6 @@ import (
 	"time"
 )
 
-type workflowDispatcher struct {
-	isAlive            bool
-	maxWorkers         int
-	submitChannel      chan *WorkflowContext
-	submitChannelMutex *sync.Mutex
-	cancel             func()
-	waitGroup          *sync.WaitGroup
-	db                 *MapleDb
-	workflowMaxRuntime time.Duration
-	log                *Logger
-}
-
 type WorkflowSources struct {
 	wdl     string
 	inputs  string
@@ -41,10 +29,6 @@ type JobContext struct {
 	cancel     func()
 }
 
-func (ctx *JobContext) String() string {
-	return fmt.Sprintf("%s (%s)", ctx.node.name, ctx.status)
-}
-
 type WorkflowContext struct {
 	uuid       uuid.UUID
 	primaryKey int64
@@ -54,8 +38,40 @@ type WorkflowContext struct {
 	calls      []*JobContext
 }
 
-func (s WorkflowSources) String() string {
-	return fmt.Sprintf("<workflow %s>", s.wdl)
+type workflowDispatcher struct {
+	isAlive            bool
+	maxWorkers         int
+	submitChannel      chan *WorkflowContext
+	submitChannelMutex *sync.Mutex
+	cancel             func()
+	waitGroup          *sync.WaitGroup
+	db                 *MapleDb
+	workflowMaxRuntime time.Duration
+	log                *Logger
+}
+
+func newWorkflowDispatcher(workers int, buffer int, log *Logger, db *MapleDb) *workflowDispatcher {
+	var waitGroup sync.WaitGroup
+	var mutex sync.Mutex
+	dispatcherCtx, dispatcherCancel := context.WithCancel(context.Background())
+
+	mutex.Lock()
+	defer mutex.Unlock()
+
+	wd := &workflowDispatcher{
+		true,
+		workers,
+		make(chan *WorkflowContext, buffer),
+		&mutex,
+		dispatcherCancel,
+		&waitGroup,
+		db,
+		time.Second * 600,
+		log}
+
+	waitGroup.Add(1)
+	go wd.runDispatcher(dispatcherCtx)
+	return wd
 }
 
 func (wd *workflowDispatcher) runJob(wfCtx *WorkflowContext, cmd *exec.Cmd, callCtx *JobContext, done chan<- *JobContext, jobCtx context.Context) {
@@ -290,30 +306,6 @@ func (wd *workflowDispatcher) runDispatcher(ctx context.Context) {
 	}
 }
 
-func newWorkflowDispatcher(workers int, buffer int, log *Logger, db *MapleDb) *workflowDispatcher {
-	var waitGroup sync.WaitGroup
-	var mutex sync.Mutex
-	dispatcherCtx, dispatcherCancel := context.WithCancel(context.Background())
-
-	mutex.Lock()
-	defer mutex.Unlock()
-
-	wd := &workflowDispatcher{
-		true,
-		workers,
-		make(chan *WorkflowContext, buffer),
-		&mutex,
-		dispatcherCancel,
-		&waitGroup,
-		db,
-		time.Second * 600,
-		log}
-
-	waitGroup.Add(1)
-	go wd.runDispatcher(dispatcherCtx)
-	return wd
-}
-
 func (wd *workflowDispatcher) abort() {
 	if !wd.isAlive {
 		return
@@ -326,18 +318,18 @@ func (wd *workflowDispatcher) wait() {
 	wd.waitGroup.Wait()
 }
 
-func (wd *workflowDispatcher) SubmitWorkflow(wdl, inputs, options string, id uuid.UUID, timeout time.Duration) (*WorkflowContext, error) {
+func (wd *workflowDispatcher) submitWorkflow(wdl, inputs, options string, id uuid.UUID, timeout time.Duration) (*WorkflowContext, error) {
 	sources := WorkflowSources{strings.TrimSpace(wdl), strings.TrimSpace(inputs), strings.TrimSpace(options)}
 	log := wd.log.ForWorkflow(id)
 	ctx, err := wd.db.NewWorkflow(id, &sources, log)
 	if err != nil {
 		return nil, err
 	}
-	wd.SubmitExistingWorkflow(ctx, timeout)
+	wd.submitExistingWorkflow(ctx, timeout)
 	return ctx, nil
 }
 
-func (wd *workflowDispatcher) SubmitExistingWorkflow(ctx *WorkflowContext, timeout time.Duration) error {
+func (wd *workflowDispatcher) submitExistingWorkflow(ctx *WorkflowContext, timeout time.Duration) error {
 	wd.submitChannelMutex.Lock()
 	defer wd.submitChannelMutex.Unlock()
 	if wd.isAlive == true {
@@ -352,11 +344,11 @@ func (wd *workflowDispatcher) SubmitExistingWorkflow(ctx *WorkflowContext, timeo
 	return nil
 }
 
-func (wd *workflowDispatcher) AbortWorkflow(id uuid.UUID) {
+func (wd *workflowDispatcher) abortWorkflow(id uuid.UUID) {
 	return
 }
 
-func SignalHandler(wd *workflowDispatcher) {
+func (wd *workflowDispatcher) signalHandler() {
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func(wd *workflowDispatcher) {
@@ -377,12 +369,12 @@ type Kernel struct {
 func NewKernel(log *Logger, dbName string, dbConnection string, concurrentWorkflows int, submitQueueSize int) *Kernel {
 	db := NewMapleDb(dbName, dbConnection, log)
 	wd := newWorkflowDispatcher(concurrentWorkflows, submitQueueSize, log, db)
-	SignalHandler(wd)
+	wd.signalHandler()
 	return &Kernel{wd, log, db}
 }
 
 func (kernel *Kernel) RunWorkflow(wdl, inputs, options string, id uuid.UUID) (*WorkflowContext, error) {
-	ctx, err := kernel.wd.SubmitWorkflow(wdl, inputs, options, id, time.Hour)
+	ctx, err := kernel.wd.submitWorkflow(wdl, inputs, options, id, time.Hour)
 	if err != nil {
 		return nil, err
 	}
@@ -390,7 +382,7 @@ func (kernel *Kernel) RunWorkflow(wdl, inputs, options string, id uuid.UUID) (*W
 }
 
 func (kernel *Kernel) SubmitWorkflow(wdl, inputs, options string, id uuid.UUID, timeout time.Duration) (*WorkflowContext, error) {
-	ctx, err := kernel.wd.SubmitWorkflow(wdl, inputs, options, id, timeout)
+	ctx, err := kernel.wd.submitWorkflow(wdl, inputs, options, id, timeout)
 	if err != nil {
 		return nil, err
 	}

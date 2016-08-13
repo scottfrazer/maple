@@ -10,7 +10,7 @@ import (
 	uuid "github.com/satori/go.uuid"
 )
 
-func SubmitHttpEndpoint(kernel *Kernel) http.HandlerFunc {
+func submitHttpEndpoint(kernel *Kernel) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		fp, _, err := r.FormFile("wdl")
 		if err != nil {
@@ -52,7 +52,15 @@ func SubmitHttpEndpoint(kernel *Kernel) http.HandlerFunc {
 			return
 		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.WriteHeader(http.StatusRequestTimeout)
+		w.WriteHeader(http.StatusOK)
 		io.WriteString(w, fmt.Sprintf("%s", ctx.uuid))
+	}
+}
+
+func pingHttpEndpoint(kernel *Kernel, version, gitHash string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, fmt.Sprintf(`{"version": "maple %s", "hash": "%s"}`, version, gitHash))
 	}
 }
