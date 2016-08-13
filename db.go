@@ -210,16 +210,7 @@ func (dsp *MapleDb) SetJobStatus(jobCtx *JobContext, status string, log *Logger)
 func (dsp *MapleDb) GetJobStatus(jobId int64, log *Logger) (string, error) {
 	dsp.mtx.Lock()
 	defer dsp.mtx.Unlock()
-	db := dsp.db
-	var query = `SELECT status FROM job_status WHERE job_id=? ORDER BY datetime(date) DESC, id DESC LIMIT 1`
-	log.DbQuery(query, strconv.FormatInt(jobId, 10))
-	row := db.QueryRow(query, jobId)
-	var status string
-	err := row.Scan(&status)
-	if err != nil {
-		return "", err
-	}
-	return status, nil
+	return dsp._GetJobStatus(jobId, log)
 }
 
 func (dsp *MapleDb) NewWorkflow(uuid uuid.UUID, sources *WorkflowSources, log *Logger) (*WorkflowContext, error) {
@@ -299,7 +290,10 @@ func (dsp *MapleDb) NewWorkflow(uuid uuid.UUID, sources *WorkflowSources, log *L
 		return nil, errors.New("could not insert into 'workflow_status' table")
 	}
 
-	ctx := WorkflowContext{uuid, workflowId, make(chan *WorkflowContext, 1), sources, "NotStarted", nil, func() {}}
+	var jobsMutex sync.Mutex
+	ctx := WorkflowContext{
+		uuid, workflowId, make(chan *WorkflowContext, 1),
+		sources, "NotStarted", nil, &jobsMutex, func() {}}
 	success = true
 	return &ctx, nil
 }
@@ -309,9 +303,11 @@ func (dsp *MapleDb) LoadWorkflow(uuid uuid.UUID, log *Logger) (*WorkflowContext,
 	defer dsp.mtx.Unlock()
 	db := dsp.db
 	var context WorkflowContext
+	var jobsMutex sync.Mutex
 
 	context.uuid = uuid
 	context.done = make(chan *WorkflowContext)
+	context.jobsMutex = &jobsMutex
 
 	query := `SELECT id FROM workflow WHERE uuid=?`
 	log.DbQuery(query, uuid.String())
@@ -342,16 +338,7 @@ func (dsp *MapleDb) SetWorkflowStatus(wfCtx *WorkflowContext, status string, log
 func (dsp *MapleDb) GetWorkflowStatus(wfCtx *WorkflowContext, log *Logger) (string, error) {
 	dsp.mtx.Lock()
 	defer dsp.mtx.Unlock()
-	db := dsp.db
-	var query = `SELECT status FROM workflow_status WHERE workflow_id=? ORDER BY datetime(date) DESC, id DESC LIMIT 1`
-	log.DbQuery(query, strconv.FormatInt(wfCtx.primaryKey, 10))
-	row := db.QueryRow(query, wfCtx.primaryKey)
-	var status string
-	err := row.Scan(&status)
-	if err != nil {
-		return "", err
-	}
-	return status, nil
+	return dsp._GetWorkflowStatus(wfCtx, log)
 }
 
 func (dsp *MapleDb) GetWorkflowsByStatus(log *Logger, status ...string) ([]*WorkflowContext, error) {
@@ -398,7 +385,7 @@ func (dsp *MapleDb) GetWorkflowsByStatus(log *Logger, status ...string) ([]*Work
 	return contexts, nil
 }
 
-func (dsp *MapleDb) _GetWorkflowStatus(log *Logger, wfCtx *WorkflowContext) (string, error) {
+func (dsp *MapleDb) _GetWorkflowStatus(wfCtx *WorkflowContext, log *Logger) (string, error) {
 	db := dsp.db
 	var query = `SELECT status FROM workflow_status WHERE workflow_id=? ORDER BY datetime(date) DESC, id DESC LIMIT 1`
 	log.DbQuery(query, strconv.FormatInt(wfCtx.primaryKey, 10))
@@ -411,9 +398,25 @@ func (dsp *MapleDb) _GetWorkflowStatus(log *Logger, wfCtx *WorkflowContext) (str
 	return status, nil
 }
 
+func (dsp *MapleDb) _GetJobStatus(jobId int64, log *Logger) (string, error) {
+	db := dsp.db
+	var query = `SELECT status FROM job_status WHERE job_id=? ORDER BY datetime(date) DESC, id DESC LIMIT 1`
+	log.DbQuery(query, strconv.FormatInt(jobId, 10))
+	row := db.QueryRow(query, jobId)
+	var status string
+	err := row.Scan(&status)
+	if err != nil {
+		return "", err
+	}
+	return status, nil
+}
+
 func (dsp *MapleDb) _LoadWorkflowPK(log *Logger, primaryKey int64) (*WorkflowContext, error) {
 	db := dsp.db
+	// TODO: consolidate creation of WorkflowContext.  e.g. hard to set ctx.jobsMutex
 	var context WorkflowContext
+	var jobsMutex sync.Mutex
+	context.jobsMutex = &jobsMutex
 	context.primaryKey = primaryKey
 
 	query := `SELECT uuid FROM workflow WHERE id=?`
@@ -433,7 +436,7 @@ func (dsp *MapleDb) _LoadWorkflowSources(log *Logger, context *WorkflowContext, 
 	var err error
 
 	context.done = make(chan *WorkflowContext)
-	context.status, err = dsp._GetWorkflowStatus(log, context)
+	context.status, err = dsp._GetWorkflowStatus(context, log)
 	if err != nil {
 		return nil, err
 	}
@@ -462,34 +465,21 @@ func (dsp *MapleDb) _LoadWorkflowSources(log *Logger, context *WorkflowContext, 
 	var jobs []*JobContext
 	for rows.Next() {
 		var job JobContext
-		err = rows.Scan(&job.primaryKey)
+		var name string
+
+		err = rows.Scan(&job.primaryKey, &name, &job.shard, &job.attempt)
 		if err != nil {
 			return nil, err
 		}
 
-		var name string
 		graph := context.source.graph()
-		err = rows.Scan(&name)
-		if err != nil {
-			return nil, err
-		}
 		node := graph.Find(name)
 		if node == nil {
 			return nil, errors.New(fmt.Sprintf("Node name %s invalid", name))
 		}
 		job.node = node
 
-		err = rows.Scan(&job.shard)
-		if err != nil {
-			return nil, err
-		}
-
-		err = rows.Scan(&job.attempt)
-		if err != nil {
-			return nil, err
-		}
-
-		status, err := dsp.GetJobStatus(job.primaryKey, log)
+		status, err := dsp._GetJobStatus(job.primaryKey, log)
 		if err != nil {
 			return nil, err
 		}

@@ -46,17 +46,25 @@ type WorkflowContext struct {
 	source     *WorkflowSources
 	status     string
 	jobs       []*JobContext
+	jobsMutex  *sync.Mutex
 	cancel     func()
 }
 
-func (ctx *WorkflowContext) jobsWithStatus(status string) []*JobContext {
-	var jobs []*JobContext
+// TODO: this algorithm could use some work
+func (ctx *WorkflowContext) isTerminal(aborting bool) bool {
+	ctx.jobsMutex.Lock()
+	defer ctx.jobsMutex.Unlock()
+
+	if !aborting && len(ctx.jobs) != len(ctx.source.graph().nodes) {
+		return false
+	}
+
 	for _, job := range ctx.jobs {
-		if job.status == status {
-			jobs = append(jobs, job)
+		if job.status == "Started" || job.status == "NotStarted" {
+			return false
 		}
 	}
-	return jobs
+	return true
 }
 
 type workflowDispatcher struct {
@@ -107,11 +115,13 @@ func (wd *workflowDispatcher) runJob(wfCtx *WorkflowContext, cmd *exec.Cmd, call
 	defer log.Info("runJob: exit")
 	subprocessCtx, subprocessCancel := context.WithCancel(jobCtx)
 
-	wd.db.SetJobStatus(callCtx, "Started", log)
+	if callCtx.status == "NotStarted" {
+		wd.db.SetJobStatus(callCtx, "Started", log)
+	}
 
 	go func() {
 		select {
-		case <-time.After(time.Second * 10):
+		case <-time.After(time.Second * 5):
 		case <-subprocessCtx.Done():
 		}
 		//cmd.Run()
@@ -153,10 +163,10 @@ func (wd *workflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResult
 
 	log.Info("runWorkflow: start")
 
-	wd.db.SetWorkflowStatus(wfCtx, "Started", log)
+	if wfCtx.status == "NotStarted" {
+		wd.db.SetWorkflowStatus(wfCtx, "Started", log)
+	}
 
-	var jobs = make(map[*JobContext]struct{})
-	var jobMutex sync.Mutex
 	var jobDone = make(chan *JobContext)
 	var workflowDone = make(chan bool)
 	var runnableJobs = make(chan *JobContext)
@@ -171,7 +181,10 @@ func (wd *workflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResult
 	}()
 
 	var abortJobs = func() {
-		for job, _ := range jobs {
+		wfCtx.jobsMutex.Lock()
+		defer wfCtx.jobsMutex.Unlock()
+
+		for _, job := range wfCtx.jobs {
 			job.cancel()
 		}
 		wd.db.SetWorkflowStatus(wfCtx, "Aborted", log)
@@ -179,42 +192,40 @@ func (wd *workflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResult
 	}
 
 	go func() {
-		reader := strings.NewReader(wfCtx.source.wdl)
-		graph := LoadGraph(reader)
+		graph := wfCtx.source.graph()
 
-		// TODO this is only for new workflows
-		for _, root := range graph.Root() {
-			// TODO: duplicated code from below
-			job, err := wd.db.NewJob(wfCtx, root, log)
+		var launch = func(node *Node) {
+			job, err := wd.db.NewJob(wfCtx, node, log)
 			if err != nil {
 				// TODO: don't panic
 				panic(err)
 			}
+			wfCtx.jobsMutex.Lock()
+			wfCtx.jobs = append(wfCtx.jobs, job)
+			wfCtx.jobsMutex.Unlock()
 			runnableJobs <- job
 		}
 
+		if len(wfCtx.jobs) > 0 {
+			for _, job := range wfCtx.jobs {
+				if job.status == "Started" {
+					runnableJobs <- job
+				}
+			}
+		} else {
+			for _, root := range graph.Root() {
+				launch(root)
+			}
+		}
+
 		for doneJob := range doneJobs {
-			wfCtx.jobs = append(wfCtx.jobs, doneJob)
-
-			jobMutex.Lock()
-			delete(jobs, doneJob)
-			jobMutex.Unlock()
-
-			// TODO wfCtx.
-			if len(wfCtx.jobs) == len(graph.nodes) || (isAborting && len(jobs) == 0) {
+			if wfCtx.isTerminal(isAborting) {
 				workflowDone <- true
 				return
 			} else if !isAborting {
 				go func() {
 					for _, nextNode := range graph.Downstream(doneJob.node) {
-						// TODO: check if this job already exists in DB.
-						// If so, then don't create a new one in the DB
-						job, err := wd.db.NewJob(wfCtx, nextNode, log)
-						if err != nil {
-							// TODO: don't panic
-							panic(err)
-						}
-						runnableJobs <- job
+						launch(nextNode)
 					}
 				}()
 			}
@@ -238,12 +249,9 @@ func (wd *workflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResult
 			select {
 			case job := <-runnableJobs:
 				log.Info("workflow: launching call: %s", job.node.String())
-				jobMutex.Lock()
 				jobCtx, cancel := context.WithCancel(context.Background())
 				job.cancel = cancel
-				jobs[job] = struct{}{}
 				go wd.runJob(wfCtx, exec.Command("sleep", "2"), job, jobDone, jobCtx)
-				jobMutex.Unlock()
 			case <-workflowDone:
 				log.Info("workflow: completed")
 				wd.db.SetWorkflowStatus(wfCtx, "Done", log)
@@ -256,12 +264,9 @@ func (wd *workflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResult
 				log.Info("workflow: aborting...")
 				abortJobs()
 
-				jobMutex.Lock()
-				if len(jobs) == 0 {
-					jobMutex.Unlock()
+				if wfCtx.isTerminal(true) {
 					return
 				}
-				jobMutex.Unlock()
 			}
 		}
 	}
@@ -277,6 +282,14 @@ func (wd *workflowDispatcher) runDispatcher(ctx context.Context) {
 	defer func() {
 		wd.waitGroup.Done()
 		log.Info("dispatcher: exit")
+	}()
+
+	go func() {
+		restartable, _ := wd.db.GetWorkflowsByStatus(log, "Started")
+		for _, wfCtx := range restartable {
+			log.Info("dispatcher: resume workflow %s", wfCtx.uuid)
+			wd.submitExistingWorkflow(wfCtx, time.Minute)
+		}
 	}()
 
 	var abort = func() {
@@ -390,8 +403,9 @@ func (wd *workflowDispatcher) signalHandler() {
 	go func(wd *workflowDispatcher) {
 		sig := <-sigs
 		wd.log.Info("%s signal detected... aborting dispatcher", sig)
-		wd.abort()
-		wd.log.Info("%s signal detected... aborted dispatcher", sig)
+		wd.log.Info("%s signal detected... abort turned off", sig)
+		//wd.abort()
+		//wd.log.Info("%s signal detected... aborted dispatcher", sig)
 		os.Exit(130)
 	}(wd)
 }

@@ -31,7 +31,8 @@ kernel.Abort(uuid)
 kernel.AbortCall(uuid, fqn string)
 kernel.List() []uuid
 
-States: Submitted -> Running -> [Aborted|Done|Failed]
+States: NotStarted -> Started -> [Aborted|Done|Failed]
+                   -> Aborted
 
 On Startup (always):
 
