@@ -82,7 +82,7 @@ type workflowDispatcher struct {
 }
 
 func newWorkflowDispatcher(workers int, buffer int, log *Logger, db *MapleDb) *workflowDispatcher {
-	var waitGroup sync.WaitGroup
+	var WaitGroup sync.WaitGroup
 	var mutex sync.Mutex
 	dispatcherCtx, dispatcherCancel := context.WithCancel(context.Background())
 
@@ -97,13 +97,13 @@ func newWorkflowDispatcher(workers int, buffer int, log *Logger, db *MapleDb) *w
 		make(chan *WorkflowContext),
 		make(map[*WorkflowContext]struct{}),
 		dispatcherCancel,
-		&waitGroup,
+		&WaitGroup,
 		db,
 		time.Second * 600,
 		log}
 
-	waitGroup.Add(1)
-	go wd.runDispatcher(dispatcherCtx)
+	WaitGroup.Add(1)
+	go wd.run(dispatcherCtx)
 	return wd
 }
 
@@ -272,7 +272,7 @@ func (wd *workflowDispatcher) runWorkflow(wfCtx *WorkflowContext, workflowResult
 	}
 }
 
-func (wd *workflowDispatcher) runDispatcher(ctx context.Context) {
+func (wd *workflowDispatcher) run(ctx context.Context) {
 	var workers = 0
 	var isAborting = false
 	var workflowDone = make(chan *WorkflowContext)
@@ -288,7 +288,7 @@ func (wd *workflowDispatcher) runDispatcher(ctx context.Context) {
 		restartable, _ := wd.db.GetWorkflowsByStatus(log, "Started")
 		for _, wfCtx := range restartable {
 			log.Info("dispatcher: resume workflow %s", wfCtx.uuid)
-			wd.submitExistingWorkflow(wfCtx, time.Minute)
+			wd.SubmitExistingWorkflow(wfCtx, time.Minute)
 		}
 	}()
 
@@ -350,30 +350,30 @@ func (wd *workflowDispatcher) runDispatcher(ctx context.Context) {
 	}
 }
 
-func (wd *workflowDispatcher) abort() {
+func (wd *workflowDispatcher) Abort() {
 	if !wd.isAlive {
 		return
 	}
 	wd.cancel()
-	wd.wait()
+	wd.Wait()
 }
 
-func (wd *workflowDispatcher) wait() {
+func (wd *workflowDispatcher) Wait() {
 	wd.waitGroup.Wait()
 }
 
-func (wd *workflowDispatcher) submitWorkflow(wdl, inputs, options string, id uuid.UUID, timeout time.Duration) (*WorkflowContext, error) {
+func (wd *workflowDispatcher) SubmitWorkflow(wdl, inputs, options string, id uuid.UUID, timeout time.Duration) (*WorkflowContext, error) {
 	sources := WorkflowSources{strings.TrimSpace(wdl), strings.TrimSpace(inputs), strings.TrimSpace(options), nil}
 	log := wd.log.ForWorkflow(id)
 	ctx, err := wd.db.NewWorkflow(id, &sources, log)
 	if err != nil {
 		return nil, err
 	}
-	wd.submitExistingWorkflow(ctx, timeout)
+	wd.SubmitExistingWorkflow(ctx, timeout)
 	return ctx, nil
 }
 
-func (wd *workflowDispatcher) submitExistingWorkflow(ctx *WorkflowContext, timeout time.Duration) error {
+func (wd *workflowDispatcher) SubmitExistingWorkflow(ctx *WorkflowContext, timeout time.Duration) error {
 	wd.submitChannelMutex.Lock()
 	defer wd.submitChannelMutex.Unlock()
 	if wd.isAlive == true {
@@ -388,7 +388,7 @@ func (wd *workflowDispatcher) submitExistingWorkflow(ctx *WorkflowContext, timeo
 	return nil
 }
 
-func (wd *workflowDispatcher) abortWorkflow(id uuid.UUID) {
+func (wd *workflowDispatcher) AbortWorkflow(id uuid.UUID) {
 	for context, _ := range wd.running {
 		if context.uuid == id {
 			wd.abortChannel <- context
@@ -397,14 +397,14 @@ func (wd *workflowDispatcher) abortWorkflow(id uuid.UUID) {
 	}
 }
 
-func (wd *workflowDispatcher) signalHandler() {
+func (wd *workflowDispatcher) SignalHandler() {
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func(wd *workflowDispatcher) {
 		sig := <-sigs
 		wd.log.Info("%s signal detected... aborting dispatcher", sig)
 		wd.log.Info("%s signal detected... abort turned off", sig)
-		//wd.abort()
+		//wd.Abort()
 		//wd.log.Info("%s signal detected... aborted dispatcher", sig)
 		os.Exit(130)
 	}(wd)
@@ -420,12 +420,12 @@ type Kernel struct {
 func NewKernel(log *Logger, dbName string, dbConnection string, concurrentWorkflows int, submitQueueSize int) *Kernel {
 	db := NewMapleDb(dbName, dbConnection, log)
 	wd := newWorkflowDispatcher(concurrentWorkflows, submitQueueSize, log, db)
-	wd.signalHandler()
+	wd.SignalHandler()
 	return &Kernel{wd, log, db, time.Now()}
 }
 
 func (kernel *Kernel) RunWorkflow(wdl, inputs, options string, id uuid.UUID) (*WorkflowContext, error) {
-	ctx, err := kernel.wd.submitWorkflow(wdl, inputs, options, id, time.Hour)
+	ctx, err := kernel.wd.SubmitWorkflow(wdl, inputs, options, id, time.Hour)
 	if err != nil {
 		return nil, err
 	}
@@ -433,7 +433,7 @@ func (kernel *Kernel) RunWorkflow(wdl, inputs, options string, id uuid.UUID) (*W
 }
 
 func (kernel *Kernel) SubmitWorkflow(wdl, inputs, options string, id uuid.UUID, timeout time.Duration) (*WorkflowContext, error) {
-	ctx, err := kernel.wd.submitWorkflow(wdl, inputs, options, id, timeout)
+	ctx, err := kernel.wd.SubmitWorkflow(wdl, inputs, options, id, timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -441,7 +441,7 @@ func (kernel *Kernel) SubmitWorkflow(wdl, inputs, options string, id uuid.UUID, 
 }
 
 func (kernel *Kernel) AbortWorkflow(id uuid.UUID) error {
-	kernel.wd.abortWorkflow(id)
+	kernel.wd.AbortWorkflow(id)
 	return nil
 }
 

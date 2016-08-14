@@ -5,5 +5,4 @@ clean:
 install:
 	go install -ldflags $(LD_FLAGS) github.com/scottfrazer/maple
 	go install -ldflags $(LD_FLAGS) github.com/scottfrazer/maple/cmd/maple
-	ls $(GOPATH)/bin/
-	ls $(GOPATH)/pkg/darwin_amd64/github.com/scottfrazer/
+	-rm maple
