@@ -39,10 +39,16 @@ On Startup (always):
 * Check database state, fix anything weird (maybe server was shutdown prematurely)
 * Handle workflow FIFOs... maybe just reconnect to them, maybe remove them
 
+workflowDispatcher - struct that contains relevant information for the WF dispatcher.  wd.run() is main goroutine
+workflowInstance (formerly WorkflowContext) - struct for workflow evaluation.
+    * wi.run() - main evaluation loop (currently wd.runWorkflow)
+    * wi.setStatus(newStatus string)
+jobInstance - ji.run()
+
 Database (db.go)
 ================
 
-Only called by the Kernel to persist data.  Nothing exported
+Only called by the Kernel to persist data.  Nothing exported.  All pointers are 
 
 NewMapleDb(settings...) *MapleDb
 

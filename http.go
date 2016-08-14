@@ -1,4 +1,4 @@
-package main
+package maple
 
 import (
 	"fmt"
@@ -10,7 +10,7 @@ import (
 	uuid "github.com/satori/go.uuid"
 )
 
-func submitHttpEndpoint(kernel *Kernel) http.HandlerFunc {
+func SubmitHttpEndpoint(kernel *Kernel) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		fp, _, err := r.FormFile("wdl")
 		if err != nil {
@@ -57,7 +57,7 @@ func submitHttpEndpoint(kernel *Kernel) http.HandlerFunc {
 	}
 }
 
-func pingHttpEndpoint(kernel *Kernel, version, gitHash string) http.HandlerFunc {
+func PingHttpEndpoint(kernel *Kernel, version, gitHash string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
@@ -65,7 +65,7 @@ func pingHttpEndpoint(kernel *Kernel, version, gitHash string) http.HandlerFunc 
 	}
 }
 
-func abortHttpEndpoint(kernel *Kernel) http.HandlerFunc {
+func AbortHttpEndpoint(kernel *Kernel) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		id, err := uuid.FromString(r.URL.Query().Get("uuid"))

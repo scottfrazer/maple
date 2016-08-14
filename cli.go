@@ -1,6 +1,6 @@
-package main
+package maple
 
-import (
+/*import (
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -28,7 +28,7 @@ func main() {
 		dbConnection = app.Flag("db", "Database connection string.  For sqlite, the file that will hold the database").Default("DB").String()
 		queueSize    = app.Flag("queue-size", "Submission queue size").Default("1000").Int()
 		concurrentWf = app.Flag("concurrent-workflows", "Number of workflows").Default("1000").Int()
-		logPath      = app.Flag("log", "Path to write logs").Default("maple.log").String()
+		logPath      = app.Flag("log", "Path to write logs").Default("log").String()
 		run          = app.Command("run", "Run workflows")
 		runGraph     = run.Arg("wdl", "Graph file").Required().String()
 		server       = app.Command("server", "Start HTTP server")
@@ -116,11 +116,11 @@ func main() {
 		logger := NewLogger().ToFile(*logPath).ToWriter(os.Stdout)
 		kernel := NewKernel(logger, *dbDriver, *dbConnection, *concurrentWf, *queueSize)
 
-		http.HandleFunc("/submit", submitHttpEndpoint(kernel))
-		http.HandleFunc("/ping", pingHttpEndpoint(kernel, Version, GitHash))
-		http.HandleFunc("/abort", abortHttpEndpoint(kernel))
+		http.HandleFunc("/submit", SubmitHttpEndpoint(kernel))
+		http.HandleFunc("/ping", PingHttpEndpoint(kernel, Version, GitHash))
+		http.HandleFunc("/abort", AbortHttpEndpoint(kernel))
 
 		logger.Info("Listening on %s ...", *host)
 		http.ListenAndServe(*host, nil)
 	}
-}
+}*/
