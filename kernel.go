@@ -37,6 +37,9 @@ type JobContext struct {
 	attempt    int
 	status     string
 	cancel     func()
+	wi         *WorkflowInstance
+	db         *MapleDb
+	log        *Logger
 }
 
 type WorkflowInstance struct {
@@ -48,6 +51,8 @@ type WorkflowInstance struct {
 	jobs       []*JobContext
 	jobsMutex  *sync.Mutex
 	cancel     func()
+	db         *MapleDb
+	log        *Logger
 }
 
 // TODO: this algorithm could use some work
@@ -107,16 +112,17 @@ func newWorkflowDispatcher(workers int, buffer int, log *Logger, db *MapleDb) *w
 	return wd
 }
 
-func (callCtx *JobContext) runJob(db *MapleDb, log *Logger, wfCtx *WorkflowInstance, cmd *exec.Cmd, done chan<- *JobContext, jobCtx context.Context) {
+func (ji *JobContext) run(cmd *exec.Cmd, done chan<- *JobContext, jobCtx context.Context) {
 	var cmdDone = make(chan bool, 1)
 	var isAborting = false
-	log = log.ForJob(wfCtx.uuid, callCtx)
-	log.Info("runJob: enter")
-	defer log.Info("runJob: exit")
+	var log = ji.log.ForJob(ji.wi.uuid, ji)
+	log.Info("run: enter")
+	defer log.Info("run: exit")
 	subprocessCtx, subprocessCancel := context.WithCancel(jobCtx)
 
-	if callCtx.status == "NotStarted" {
-		db.SetJobStatus(callCtx, "Started", log)
+	if ji.status == "NotStarted" {
+		// TODO: move this to ji.SetStatus()
+		ji.db.SetJobStatus(ji, "Started", log)
 	}
 
 	go func() {
@@ -144,13 +150,13 @@ func (callCtx *JobContext) runJob(db *MapleDb, log *Logger, wfCtx *WorkflowInsta
 			} else if !cmd.ProcessState.Success() {
 				status = "failed"
 			}*/
-			log.Info("runJob: done (status %s)", status)
-			db.SetJobStatus(callCtx, status, log)
-			done <- callCtx
+			log.Info("run: done (status %s)", status)
+			ji.db.SetJobStatus(ji, status, log)
+			done <- ji
 			return
 		case <-jobCtx.Done():
 			if !isAborting {
-				log.Info("runJob: abort")
+				log.Info("run: abort")
 				subprocessCancel()
 				isAborting = true
 			}
@@ -158,13 +164,17 @@ func (callCtx *JobContext) runJob(db *MapleDb, log *Logger, wfCtx *WorkflowInsta
 	}
 }
 
-func (wi *WorkflowInstance) runWorkflow(db *MapleDb, logger *Logger, workflowResultsChannel chan<- *WorkflowInstance, ctx context.Context) {
-	var log = logger.ForWorkflow(wi.uuid)
+func (wi *WorkflowInstance) run(workflowResultsChannel chan<- *WorkflowInstance, ctx context.Context) {
+	var log = wi.log.ForWorkflow(wi.uuid)
 
-	log.Info("runWorkflow: start")
+	log.Info("run: enter")
+	defer log.Info("run: exit")
 
 	if wi.status == "NotStarted" {
-		db.SetWorkflowStatus(wi, "Started", log)
+		// TODO: don't allow SetWorkflowStatus to modify the pointer,
+		// instead implement  wi.SetStatus()
+		// TODO: Also put db and log on the WorkflowInstance
+		wi.db.SetWorkflowStatus(wi, "Started", log)
 	}
 
 	var jobDone = make(chan *JobContext)
@@ -187,15 +197,16 @@ func (wi *WorkflowInstance) runWorkflow(db *MapleDb, logger *Logger, workflowRes
 		for _, job := range wi.jobs {
 			job.cancel()
 		}
-		db.SetWorkflowStatus(wi, "Aborted", log)
+		wi.db.SetWorkflowStatus(wi, "Aborted", log)
 		isAborting = true
 	}
 
+	// TODO: pull this into a separate function wi.DoneJobsHandler
 	go func() {
 		graph := wi.source.graph()
 
 		var launch = func(node *Node) {
-			job, err := db.NewJob(wi, node, log)
+			job, err := wi.db.NewJob(wi, node, log)
 			if err != nil {
 				// TODO: don't panic
 				panic(err)
@@ -238,11 +249,11 @@ func (wi *WorkflowInstance) runWorkflow(db *MapleDb, logger *Logger, workflowRes
 			case <-workflowDone:
 				log.Info("workflow: completed")
 				if wi.status != "Aborted" {
-					db.SetWorkflowStatus(wi, "Done", log)
+					wi.db.SetWorkflowStatus(wi, "Done", log)
 				}
 				return
 			case call := <-jobDone:
-				log.Info("workflow: subprocess finished: %s", call.status)
+				log.Info("workflow: job finished: %s", call.status)
 				doneJobs <- call
 			}
 		} else {
@@ -251,13 +262,13 @@ func (wi *WorkflowInstance) runWorkflow(db *MapleDb, logger *Logger, workflowRes
 				log.Info("workflow: launching call: %s", job.node.String())
 				jobCtx, cancel := context.WithCancel(context.Background())
 				job.cancel = cancel
-				go job.runJob(db, logger, wi, exec.Command("sleep", "2"), jobDone, jobCtx)
+				go job.run(exec.Command("sleep", "2"), jobDone, jobCtx)
 			case <-workflowDone:
 				log.Info("workflow: completed")
-				db.SetWorkflowStatus(wi, "Done", log)
+				wi.db.SetWorkflowStatus(wi, "Done", log)
 				return
 			case call := <-jobDone:
-				log.Info("workflow: subprocess finished: %s", call.status)
+				log.Info("workflow: job finished: %s", call.status)
 				doneJobs <- call
 			case <-ctx.Done():
 				// this is for cancellations AND timeouts
@@ -327,7 +338,7 @@ func (wd *workflowDispatcher) run(ctx context.Context) {
 				subCtx, workflowCancel := context.WithTimeout(ctx, wd.workflowMaxRuntime)
 				wfContext.cancel = workflowCancel
 				log.Info("dispatcher: starting %s", wfContext.uuid)
-				go wfContext.runWorkflow(wd.db, wd.log, workflowDone, subCtx)
+				go wfContext.run(workflowDone, subCtx)
 			case abortUuid := <-wd.abortChannel:
 				for context, _ := range wd.running {
 					if context.uuid == abortUuid.uuid {

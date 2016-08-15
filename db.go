@@ -187,7 +187,7 @@ func (dsp *MapleDb) NewJob(wfCtx *WorkflowInstance, node *Node, log *Logger) (*J
 		return nil, errors.New("could not insert into 'job_status' table")
 	}
 
-	ctx := JobContext{jobId, node, 0, 1, "NotStarted", func() {}}
+	ctx := JobContext{jobId, node, 0, 1, "NotStarted", func() {}, wfCtx, dsp, log}
 	success = true
 	return &ctx, nil
 }
@@ -293,7 +293,7 @@ func (dsp *MapleDb) NewWorkflow(uuid uuid.UUID, sources *WorkflowSources, log *L
 	var jobsMutex sync.Mutex
 	ctx := WorkflowInstance{
 		uuid, workflowId, make(chan *WorkflowInstance, 1),
-		sources, "NotStarted", nil, &jobsMutex, func() {}}
+		sources, "NotStarted", nil, &jobsMutex, func() {}, dsp, log.ForWorkflow(uuid)}
 	success = true
 	return &ctx, nil
 }
