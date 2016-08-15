@@ -24,11 +24,17 @@ The Kernel API will be a Go-only API that will allow submission, manipulation, a
 The Kernel is the only Maple API that's exported.  The Kernel will call into the Database layer.  Kernel should allow only non-destructive type pass-through functions, like GetWorkflowStatus(), but not SetWorkflowStatus(), and perhaps some minor repackaging of data (e.g. SnapshotOf() returning a *WorkflowInstance)
 
 NewKernel(settings...) *Kernel
+kernel.On() - start goroutines, re-attach to existing jobs, start accepting submissions
+kernel.Off() - shut down all goroutines, stop accepting submissions, leave jobs running.
+               calls to Submit(), Run() return fast with error.  Should return when all
+               goroutines shut down
+kernel.AcceptSubmissions(bool) - calls to Submit(), Run() return error fast when 'false'
+
+kernel.Abort(uuid) - abort single workflow
+kernel.AbortCall(uuid, fqn string)
 kernel.Run(wdl, inputs, options string) *WorkflowInstance // returns when workflow finishes
 kernel.Submit(...) uuid // same as above, but returns quick once it's scheduled.
 kernel.SnapshotOf(uuid) *WorkflowInstance
-kernel.Abort(uuid)
-kernel.AbortCall(uuid, fqn string)
 kernel.List() []uuid
 
 States: NotStarted -> Started -> [Aborted|Done|Failed]

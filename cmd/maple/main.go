@@ -117,6 +117,8 @@ func main() {
 		logger := maple.NewLogger().ToFile(*logPath).ToWriter(os.Stdout)
 		kernel := maple.NewKernel(logger, *dbDriver, *dbConnection, *concurrentWf, *queueSize)
 
+		kernel.On()
+
 		http.HandleFunc("/submit", maple.SubmitHttpEndpoint(kernel))
 		http.HandleFunc("/ping", maple.PingHttpEndpoint(kernel, Version, GitHash))
 		http.HandleFunc("/abort", maple.AbortHttpEndpoint(kernel))

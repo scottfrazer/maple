@@ -38,7 +38,7 @@ func SubmitHttpEndpoint(kernel *Kernel) http.HandlerFunc {
 		}
 
 		uuid := uuid.NewV4()
-		ctx, err := kernel.SubmitWorkflow(wdl, inputs, options, uuid, time.Millisecond*500)
+		ctx, err := kernel.Submit(wdl, inputs, options, uuid, time.Millisecond*500)
 		if err != nil {
 			if err.Error() == "Timeout submitting workflow" {
 				w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -77,7 +77,7 @@ func AbortHttpEndpoint(kernel *Kernel) http.HandlerFunc {
 			return
 		}
 
-		err = kernel.AbortWorkflow(id)
+		err = kernel.Abort(id, time.Minute)
 
 		// TODO: Error handling code is duplicated, here and above
 		if err != nil {

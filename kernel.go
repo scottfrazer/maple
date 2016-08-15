@@ -2,6 +2,7 @@ package maple
 
 import (
 	"errors"
+	"fmt"
 	"github.com/satori/go.uuid"
 	"golang.org/x/net/context"
 	"os"
@@ -40,76 +41,6 @@ type JobInstance struct {
 	wi         *WorkflowInstance
 	db         *MapleDb
 	log        *Logger
-}
-
-type WorkflowInstance struct {
-	uuid       uuid.UUID
-	primaryKey int64
-	done       chan *WorkflowInstance
-	source     *WorkflowSources
-	status     string
-	jobs       []*JobInstance
-	jobsMutex  *sync.Mutex
-	cancel     func()
-	db         *MapleDb
-	log        *Logger
-}
-
-// TODO: this algorithm could use some work
-func (ctx *WorkflowInstance) isTerminal(aborting bool) bool {
-	ctx.jobsMutex.Lock()
-	defer ctx.jobsMutex.Unlock()
-
-	if !aborting && len(ctx.jobs) != len(ctx.source.graph().nodes) {
-		return false
-	}
-
-	for _, job := range ctx.jobs {
-		if job.status == "Started" || job.status == "NotStarted" {
-			return false
-		}
-	}
-	return true
-}
-
-type workflowDispatcher struct {
-	isAlive            bool
-	maxWorkers         int
-	submitChannel      chan *WorkflowInstance
-	submitChannelMutex *sync.Mutex
-	abortChannel       chan *WorkflowInstance
-	running            map[*WorkflowInstance]struct{}
-	cancel             func()
-	waitGroup          *sync.WaitGroup
-	db                 *MapleDb
-	workflowMaxRuntime time.Duration
-	log                *Logger
-}
-
-func newWorkflowDispatcher(workers int, buffer int, log *Logger, db *MapleDb) *workflowDispatcher {
-	var WaitGroup sync.WaitGroup
-	var mutex sync.Mutex
-	dispatcherCtx, dispatcherCancel := context.WithCancel(context.Background())
-
-	mutex.Lock()
-	defer mutex.Unlock()
-
-	wd := &workflowDispatcher{
-		true,
-		workers,
-		make(chan *WorkflowInstance, buffer),
-		&mutex,
-		make(chan *WorkflowInstance),
-		make(map[*WorkflowInstance]struct{}),
-		dispatcherCancel,
-		&WaitGroup,
-		db,
-		time.Second * 600,
-		log}
-
-	WaitGroup.Add(1)
-	go wd.run(dispatcherCtx)
-	return wd
 }
 
 func (ji *JobInstance) run(cmd *exec.Cmd, done chan<- *JobInstance, jobCtx context.Context) {
@@ -164,6 +95,42 @@ func (ji *JobInstance) run(cmd *exec.Cmd, done chan<- *JobInstance, jobCtx conte
 	}
 }
 
+type WorkflowInstance struct {
+	uuid       uuid.UUID
+	primaryKey int64
+	done       chan *WorkflowInstance
+	source     *WorkflowSources
+	status     string
+	jobs       []*JobInstance
+	jobsMutex  *sync.Mutex
+	cancel     func()
+	db         *MapleDb
+	log        *Logger
+}
+
+// TODO: this algorithm could use some work
+func (ctx *WorkflowInstance) isTerminal(aborting bool) bool {
+	ctx.jobsMutex.Lock()
+	defer ctx.jobsMutex.Unlock()
+
+	if !aborting && len(ctx.jobs) != len(ctx.source.graph().nodes) {
+		return false
+	}
+
+	for _, job := range ctx.jobs {
+		if job.status == "Started" || job.status == "NotStarted" {
+			return false
+		}
+	}
+	return true
+}
+
+func (wi *WorkflowInstance) setStatus(status string) {
+	// TODO: don't allow SetWorkflowStatus to modify the pointer,
+	wi.db.SetWorkflowStatus(wi, status, wi.log)
+	wi.status = status
+}
+
 func (wi *WorkflowInstance) run(workflowResultsChannel chan<- *WorkflowInstance, ctx context.Context) {
 	var log = wi.log.ForWorkflow(wi.uuid)
 
@@ -171,10 +138,7 @@ func (wi *WorkflowInstance) run(workflowResultsChannel chan<- *WorkflowInstance,
 	defer log.Info("run: exit")
 
 	if wi.status == "NotStarted" {
-		// TODO: don't allow SetWorkflowStatus to modify the pointer,
-		// instead implement  wi.SetStatus()
-		// TODO: Also put db and log on the WorkflowInstance
-		wi.db.SetWorkflowStatus(wi, "Started", log)
+		wi.setStatus("Started")
 	}
 
 	var jobDone = make(chan *JobInstance)
@@ -197,7 +161,7 @@ func (wi *WorkflowInstance) run(workflowResultsChannel chan<- *WorkflowInstance,
 		for _, job := range wi.jobs {
 			job.cancel()
 		}
-		wi.db.SetWorkflowStatus(wi, "Aborted", log)
+		wi.setStatus("Aborted")
 		isAborting = true
 	}
 
@@ -249,7 +213,7 @@ func (wi *WorkflowInstance) run(workflowResultsChannel chan<- *WorkflowInstance,
 			case <-workflowDone:
 				log.Info("workflow: completed")
 				if wi.status != "Aborted" {
-					wi.db.SetWorkflowStatus(wi, "Done", log)
+					wi.setStatus("Done")
 				}
 				return
 			case call := <-jobDone:
@@ -265,7 +229,7 @@ func (wi *WorkflowInstance) run(workflowResultsChannel chan<- *WorkflowInstance,
 				go job.run(exec.Command("sleep", "2"), jobDone, jobCtx)
 			case <-workflowDone:
 				log.Info("workflow: completed")
-				wi.db.SetWorkflowStatus(wi, "Done", log)
+				wi.setStatus("Done")
 				return
 			case call := <-jobDone:
 				log.Info("workflow: job finished: %s", call.status)
@@ -283,23 +247,38 @@ func (wi *WorkflowInstance) run(workflowResultsChannel chan<- *WorkflowInstance,
 	}
 }
 
-func (wd *workflowDispatcher) run(ctx context.Context) {
+type Kernel struct {
+	log                *Logger
+	db                 *MapleDb
+	start              time.Time
+	isAlive            bool
+	maxWorkers         int
+	submitChannel      chan *WorkflowInstance
+	submitChannelMutex *sync.Mutex
+	abortChannel       chan *WorkflowInstance
+	running            map[*WorkflowInstance]struct{}
+	cancel             func()
+	waitGroup          *sync.WaitGroup
+	workflowMaxRuntime time.Duration
+}
+
+func (wd Kernel) run(ctx context.Context) {
 	var workers = 0
 	var isAborting = false
 	var workflowDone = make(chan *WorkflowInstance)
 	var log = wd.log
 
-	log.Info("dispatcher: enter")
+	log.Info("kernel: enter")
 	defer func() {
 		wd.waitGroup.Done()
-		log.Info("dispatcher: exit")
+		log.Info("kernel: exit")
 	}()
 
 	go func() {
 		restartable, _ := wd.db.GetWorkflowsByStatus(log, "Started")
 		for _, wfCtx := range restartable {
-			log.Info("dispatcher: resume workflow %s", wfCtx.uuid)
-			wd.SubmitExistingWorkflow(wfCtx, time.Minute)
+			log.Info("kernel: resume workflow %s", wfCtx.uuid)
+			wd.enqueue(wfCtx, time.Minute)
 		}
 	}()
 
@@ -316,7 +295,7 @@ func (wd *workflowDispatcher) run(ctx context.Context) {
 	}
 
 	var processDone = func(result *WorkflowInstance) {
-		log.Info("dispatcher: workflow %s finished: %s", result.uuid, result.status)
+		log.Info("kernel: workflow %s finished: %s", result.uuid, result.status)
 		delete(wd.running, result)
 		workers--
 	}
@@ -337,7 +316,7 @@ func (wd *workflowDispatcher) run(ctx context.Context) {
 				wd.running[wfContext] = struct{}{}
 				subCtx, workflowCancel := context.WithTimeout(ctx, wd.workflowMaxRuntime)
 				wfContext.cancel = workflowCancel
-				log.Info("dispatcher: starting %s", wfContext.uuid)
+				log.Info("kernel: starting %s", wfContext.uuid)
 				go wfContext.run(workflowDone, subCtx)
 			case abortUuid := <-wd.abortChannel:
 				for context, _ := range wd.running {
@@ -361,30 +340,20 @@ func (wd *workflowDispatcher) run(ctx context.Context) {
 	}
 }
 
-func (wd *workflowDispatcher) Abort() {
-	if !wd.isAlive {
-		return
-	}
-	wd.cancel()
-	wd.Wait()
+func (wd Kernel) signalHandler() {
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	go func(wd Kernel) {
+		sig := <-sigs
+		wd.log.Info("%s signal detected... aborting dispatcher", sig)
+		wd.log.Info("%s signal detected... abort turned off", sig)
+		//wd.Abort()
+		//wd.log.Info("%s signal detected... aborted dispatcher", sig)
+		os.Exit(130)
+	}(wd)
 }
 
-func (wd *workflowDispatcher) Wait() {
-	wd.waitGroup.Wait()
-}
-
-func (wd *workflowDispatcher) SubmitWorkflow(wdl, inputs, options string, id uuid.UUID, timeout time.Duration) (*WorkflowInstance, error) {
-	sources := WorkflowSources{strings.TrimSpace(wdl), strings.TrimSpace(inputs), strings.TrimSpace(options), nil}
-	log := wd.log.ForWorkflow(id)
-	ctx, err := wd.db.NewWorkflow(id, &sources, log)
-	if err != nil {
-		return nil, err
-	}
-	wd.SubmitExistingWorkflow(ctx, timeout)
-	return ctx, nil
-}
-
-func (wd *workflowDispatcher) SubmitExistingWorkflow(ctx *WorkflowInstance, timeout time.Duration) error {
+func (wd *Kernel) enqueue(ctx *WorkflowInstance, timeout time.Duration) error {
 	wd.submitChannelMutex.Lock()
 	defer wd.submitChannelMutex.Unlock()
 	if wd.isAlive == true {
@@ -399,60 +368,92 @@ func (wd *workflowDispatcher) SubmitExistingWorkflow(ctx *WorkflowInstance, time
 	return nil
 }
 
-func (wd *workflowDispatcher) AbortWorkflow(id uuid.UUID) {
-	for context, _ := range wd.running {
-		if context.uuid == id {
-			wd.abortChannel <- context
-			<-context.done
-		}
-	}
-}
-
-func (wd *workflowDispatcher) SignalHandler() {
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-	go func(wd *workflowDispatcher) {
-		sig := <-sigs
-		wd.log.Info("%s signal detected... aborting dispatcher", sig)
-		wd.log.Info("%s signal detected... abort turned off", sig)
-		//wd.Abort()
-		//wd.log.Info("%s signal detected... aborted dispatcher", sig)
-		os.Exit(130)
-	}(wd)
-}
-
-type Kernel struct {
-	wd    *workflowDispatcher
-	log   *Logger
-	db    *MapleDb
-	start time.Time
-}
-
 func NewKernel(log *Logger, dbName string, dbConnection string, concurrentWorkflows int, submitQueueSize int) *Kernel {
+	var wg sync.WaitGroup
+	var mutex sync.Mutex
+	// TODO: move DB creation into On()?  Semantics should be: zero DB connections on Off()
 	db := NewMapleDb(dbName, dbConnection, log)
-	wd := newWorkflowDispatcher(concurrentWorkflows, submitQueueSize, log, db)
-	wd.SignalHandler()
-	return &Kernel{wd, log, db, time.Now()}
+	wd := Kernel{
+		log:                log,
+		db:                 db,
+		start:              time.Now(),
+		isAlive:            true,
+		maxWorkers:         concurrentWorkflows,
+		submitChannel:      make(chan *WorkflowInstance, submitQueueSize),
+		submitChannelMutex: &mutex,
+		abortChannel:       make(chan *WorkflowInstance),
+		running:            make(map[*WorkflowInstance]struct{}),
+		cancel:             func() {},
+		waitGroup:          &wg,
+		workflowMaxRuntime: time.Second * 600}
+	return &wd
 }
 
-func (kernel *Kernel) RunWorkflow(wdl, inputs, options string, id uuid.UUID) (*WorkflowInstance, error) {
-	ctx, err := kernel.wd.SubmitWorkflow(wdl, inputs, options, id, time.Hour)
+func (kernel *Kernel) On() {
+	if kernel.isAlive {
+		return
+	}
+
+	kernel.submitChannelMutex.Lock()
+	defer kernel.submitChannelMutex.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	kernel.cancel = cancel
+	kernel.waitGroup.Add(1)
+	go kernel.run(ctx)
+	kernel.signalHandler() // TODO: make this part of kernel.run(), also make it shutdown on Off()
+}
+
+func (wd *Kernel) Off() {
+	if !wd.isAlive {
+		return
+	}
+	// TODO: call db.Close()
+	wd.cancel()
+	wd.waitGroup.Wait()
+}
+
+func (kernel *Kernel) Run(wdl, inputs, options string, id uuid.UUID) (*WorkflowInstance, error) {
+	ctx, err := kernel.Submit(wdl, inputs, options, id, time.Hour)
 	if err != nil {
 		return nil, err
 	}
 	return <-ctx.done, nil
 }
 
-func (kernel *Kernel) SubmitWorkflow(wdl, inputs, options string, id uuid.UUID, timeout time.Duration) (*WorkflowInstance, error) {
-	ctx, err := kernel.wd.SubmitWorkflow(wdl, inputs, options, id, timeout)
+func (wd *Kernel) Submit(wdl, inputs, options string, id uuid.UUID, timeout time.Duration) (*WorkflowInstance, error) {
+	sources := WorkflowSources{strings.TrimSpace(wdl), strings.TrimSpace(inputs), strings.TrimSpace(options), nil}
+	log := wd.log.ForWorkflow(id)
+	ctx, err := wd.db.NewWorkflow(id, &sources, log)
 	if err != nil {
 		return nil, err
 	}
+	wd.enqueue(ctx, timeout)
 	return ctx, nil
 }
 
-func (kernel *Kernel) AbortWorkflow(id uuid.UUID) error {
-	kernel.wd.AbortWorkflow(id)
+func (wd *Kernel) Abort(id uuid.UUID, timeout time.Duration) error {
+	for context, _ := range wd.running {
+		if context.uuid == id {
+			timer := time.After(timeout)
+
+			select {
+			case wd.abortChannel <- context:
+			case <-timer:
+				return errors.New(fmt.Sprintf("Timeout submitting workflow %s to be aborted", context.uuid))
+			}
+
+			select {
+			case <-context.done:
+			case <-timer:
+				return errors.New(fmt.Sprintf("Timeout aborting workflow %s", context.uuid))
+			}
+		}
+	}
+	return nil
+}
+
+func (wd *Kernel) AbortCall(id uuid.UUID, timeout time.Duration) error {
 	return nil
 }
 
@@ -462,8 +463,4 @@ func (kernel *Kernel) ListWorkflows() []uuid.UUID {
 
 func (kernel *Kernel) Uptime() time.Duration {
 	return time.Since(kernel.start)
-}
-
-func (kernel *Kernel) Shutdown() {
-	// Shutdown dispatcher, call db.Close()
 }
