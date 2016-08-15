@@ -108,6 +108,14 @@ type WorkflowInstance struct {
 	log        *Logger
 }
 
+func (wi *WorkflowInstance) Uuid() uuid.UUID {
+	return wi.uuid
+}
+
+func (wi *WorkflowInstance) Status() string {
+	return wi.status
+}
+
 // TODO: this algorithm could use some work
 func (ctx *WorkflowInstance) isTerminal(aborting bool) bool {
 	ctx.jobsMutex.Lock()
@@ -458,8 +466,8 @@ func (kernel *Kernel) AbortCall(id uuid.UUID, timeout time.Duration) error {
 	return nil
 }
 
-func (kernel *Kernel) ListWorkflows() []uuid.UUID {
-	return nil
+func (kernel *Kernel) List() ([]*WorkflowInstance, error) {
+	return kernel.db.GetWorkflowsByStatus(kernel.log, "Started", "NotStarted", "Done", "Aborted")
 }
 
 func (kernel *Kernel) Uptime() time.Duration {

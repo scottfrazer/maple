@@ -36,6 +36,7 @@ func main() {
 		ping         = app.Command("ping", "Send ping to Maple server")
 		abort        = app.Command("abort", "Send ping to Maple server")
 		abortUuid    = abort.Arg("uuid", "UUID of workflow to abort").Required().String()
+		list         = app.Command("list", "List workflows")
 	)
 
 	kingpin.Version(Version)
@@ -69,6 +70,27 @@ func main() {
 		fmt.Printf("Server version: %s\n", version)
 		fmt.Printf("Server Git hash: %s\n", hash)
 		fmt.Printf("Server uptime: %s\n", uptime)
+	case list.FullCommand():
+		resp, err := http.Get(fmt.Sprintf("http://%s/list", *host))
+		if err != nil {
+			panic(err)
+		}
+		defer resp.Body.Close()
+		body, err := ioutil.ReadAll(resp.Body)
+
+		type Thing struct {
+			Uuid   string
+			Status string
+		}
+		var dat []Thing
+
+		if err := json.Unmarshal([]byte(body), &dat); err != nil {
+			panic(err)
+		}
+
+		for _, thing := range dat {
+			fmt.Printf("%s %s\n", thing.Uuid, thing.Status)
+		}
 	case run.FullCommand():
 		contents, err := ioutil.ReadFile(*runGraph)
 		if err != nil {
@@ -122,6 +144,7 @@ func main() {
 		http.HandleFunc("/submit", maple.SubmitHttpEndpoint(kernel))
 		http.HandleFunc("/ping", maple.PingHttpEndpoint(kernel, Version, GitHash))
 		http.HandleFunc("/abort", maple.AbortHttpEndpoint(kernel))
+		http.HandleFunc("/list", maple.ListHttpEndpoint(kernel))
 
 		logger.Info("Listening on %s ...", *host)
 		http.ListenAndServe(*host, nil)

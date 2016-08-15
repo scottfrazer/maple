@@ -5,6 +5,7 @@ import (
 	"io"
 	"io/ioutil"
 	"net/http"
+	"strings"
 	"time"
 
 	uuid "github.com/satori/go.uuid"
@@ -67,7 +68,6 @@ func PingHttpEndpoint(kernel *Kernel, version, gitHash string) http.HandlerFunc 
 
 func AbortHttpEndpoint(kernel *Kernel) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		id, err := uuid.FromString(r.URL.Query().Get("uuid"))
 
 		if err != nil {
@@ -88,5 +88,29 @@ func AbortHttpEndpoint(kernel *Kernel) http.HandlerFunc {
 		}
 
 		w.WriteHeader(http.StatusOK)
+	}
+}
+
+func ListHttpEndpoint(kernel *Kernel) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		wfs, err := kernel.List()
+
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusInternalServerError)
+			io.WriteString(w, fmt.Sprintf(`{"message": "/list/: %s"}`, err))
+			return
+		}
+
+		if len(wfs) == 0 {
+			io.WriteString(w, "[]")
+			return
+		}
+
+		var strs []string
+		for _, wf := range wfs {
+			strs = append(strs, fmt.Sprintf(`{"Uuid": "%s", "Status": "%s"}`, wf.Uuid(), wf.Status()))
+		}
+		io.WriteString(w, fmt.Sprintf("[\n  %s\n]", strings.Join(strs, ",\n  ")))
 	}
 }
