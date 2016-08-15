@@ -126,7 +126,7 @@ func (dsp *MapleDb) setup() {
 	}
 }
 
-func (dsp *MapleDb) NewJob(wfCtx *WorkflowInstance, node *Node, log *Logger) (*JobContext, error) {
+func (dsp *MapleDb) NewJob(wfCtx *WorkflowInstance, node *Node, log *Logger) (*JobInstance, error) {
 	dsp.mtx.Lock()
 	defer dsp.mtx.Unlock()
 	db := dsp.db
@@ -187,12 +187,12 @@ func (dsp *MapleDb) NewJob(wfCtx *WorkflowInstance, node *Node, log *Logger) (*J
 		return nil, errors.New("could not insert into 'job_status' table")
 	}
 
-	ctx := JobContext{jobId, node, 0, 1, "NotStarted", func() {}, wfCtx, dsp, log}
+	ctx := JobInstance{jobId, node, 0, 1, "NotStarted", func() {}, wfCtx, dsp, log}
 	success = true
 	return &ctx, nil
 }
 
-func (dsp *MapleDb) SetJobStatus(jobCtx *JobContext, status string, log *Logger) (bool, error) {
+func (dsp *MapleDb) SetJobStatus(jobCtx *JobInstance, status string, log *Logger) (bool, error) {
 	dsp.mtx.Lock()
 	defer dsp.mtx.Unlock()
 	db := dsp.db
@@ -462,9 +462,9 @@ func (dsp *MapleDb) _LoadWorkflowSources(log *Logger, context *WorkflowInstance,
 	}
 	defer rows.Close()
 
-	var jobs []*JobContext
+	var jobs []*JobInstance
 	for rows.Next() {
-		var job JobContext
+		var job JobInstance
 		var name string
 
 		err = rows.Scan(&job.primaryKey, &name, &job.shard, &job.attempt)

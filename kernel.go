@@ -30,7 +30,7 @@ func (sources *WorkflowSources) graph() *Graph {
 	return sources._graph
 }
 
-type JobContext struct {
+type JobInstance struct {
 	primaryKey int64
 	node       *Node
 	shard      int
@@ -48,7 +48,7 @@ type WorkflowInstance struct {
 	done       chan *WorkflowInstance
 	source     *WorkflowSources
 	status     string
-	jobs       []*JobContext
+	jobs       []*JobInstance
 	jobsMutex  *sync.Mutex
 	cancel     func()
 	db         *MapleDb
@@ -112,7 +112,7 @@ func newWorkflowDispatcher(workers int, buffer int, log *Logger, db *MapleDb) *w
 	return wd
 }
 
-func (ji *JobContext) run(cmd *exec.Cmd, done chan<- *JobContext, jobCtx context.Context) {
+func (ji *JobInstance) run(cmd *exec.Cmd, done chan<- *JobInstance, jobCtx context.Context) {
 	var cmdDone = make(chan bool, 1)
 	var isAborting = false
 	var log = ji.log.ForJob(ji.wi.uuid, ji)
@@ -177,11 +177,11 @@ func (wi *WorkflowInstance) run(workflowResultsChannel chan<- *WorkflowInstance,
 		wi.db.SetWorkflowStatus(wi, "Started", log)
 	}
 
-	var jobDone = make(chan *JobContext)
+	var jobDone = make(chan *JobInstance)
 	var workflowDone = make(chan bool)
-	var runnableJobs = make(chan *JobContext)
+	var runnableJobs = make(chan *JobInstance)
 	var isAborting = false
-	var doneJobs = make(chan *JobContext)
+	var doneJobs = make(chan *JobInstance)
 
 	defer func() {
 		wi.done <- wi

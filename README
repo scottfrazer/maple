@@ -78,12 +78,12 @@ interface WdlFile {
 
 NewLocalBackend(wf *WorkflowInstance, settings...) *MapleBackend
 backend.DbInit() error
-backend.Run(job *JobContext) handle
+backend.Run(job *JobInstance) handle
 backend.Abort(h handle)
 backend.Results(h handle) []*WdlFile
 backend.Status(h handle) string
 backend.Wait(h handle)
-backend.JobFile(job *JobContext, relpath string) *WdlFile
+backend.JobFile(job *JobInstance, relpath string) *WdlFile
 backend.File(abspath string) *WdlFile
 
 Filesystem
