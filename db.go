@@ -126,7 +126,7 @@ func (dsp *MapleDb) setup() {
 	}
 }
 
-func (dsp *MapleDb) NewJob(wfCtx *WorkflowContext, node *Node, log *Logger) (*JobContext, error) {
+func (dsp *MapleDb) NewJob(wfCtx *WorkflowInstance, node *Node, log *Logger) (*JobContext, error) {
 	dsp.mtx.Lock()
 	defer dsp.mtx.Unlock()
 	db := dsp.db
@@ -213,7 +213,7 @@ func (dsp *MapleDb) GetJobStatus(jobId int64, log *Logger) (string, error) {
 	return dsp._GetJobStatus(jobId, log)
 }
 
-func (dsp *MapleDb) NewWorkflow(uuid uuid.UUID, sources *WorkflowSources, log *Logger) (*WorkflowContext, error) {
+func (dsp *MapleDb) NewWorkflow(uuid uuid.UUID, sources *WorkflowSources, log *Logger) (*WorkflowInstance, error) {
 	dsp.mtx.Lock()
 	defer dsp.mtx.Unlock()
 	db := dsp.db
@@ -291,22 +291,22 @@ func (dsp *MapleDb) NewWorkflow(uuid uuid.UUID, sources *WorkflowSources, log *L
 	}
 
 	var jobsMutex sync.Mutex
-	ctx := WorkflowContext{
-		uuid, workflowId, make(chan *WorkflowContext, 1),
+	ctx := WorkflowInstance{
+		uuid, workflowId, make(chan *WorkflowInstance, 1),
 		sources, "NotStarted", nil, &jobsMutex, func() {}}
 	success = true
 	return &ctx, nil
 }
 
-func (dsp *MapleDb) LoadWorkflow(uuid uuid.UUID, log *Logger) (*WorkflowContext, error) {
+func (dsp *MapleDb) LoadWorkflow(uuid uuid.UUID, log *Logger) (*WorkflowInstance, error) {
 	dsp.mtx.Lock()
 	defer dsp.mtx.Unlock()
 	db := dsp.db
-	var context WorkflowContext
+	var context WorkflowInstance
 	var jobsMutex sync.Mutex
 
 	context.uuid = uuid
-	context.done = make(chan *WorkflowContext)
+	context.done = make(chan *WorkflowInstance)
 	context.jobsMutex = &jobsMutex
 
 	query := `SELECT id FROM workflow WHERE uuid=?`
@@ -320,7 +320,7 @@ func (dsp *MapleDb) LoadWorkflow(uuid uuid.UUID, log *Logger) (*WorkflowContext,
 	return dsp._LoadWorkflowSources(log, &context, context.primaryKey)
 }
 
-func (dsp *MapleDb) SetWorkflowStatus(wfCtx *WorkflowContext, status string, log *Logger) (bool, error) {
+func (dsp *MapleDb) SetWorkflowStatus(wfCtx *WorkflowInstance, status string, log *Logger) (bool, error) {
 	dsp.mtx.Lock()
 	defer dsp.mtx.Unlock()
 	db := dsp.db
@@ -335,13 +335,13 @@ func (dsp *MapleDb) SetWorkflowStatus(wfCtx *WorkflowContext, status string, log
 	return true, nil
 }
 
-func (dsp *MapleDb) GetWorkflowStatus(wfCtx *WorkflowContext, log *Logger) (string, error) {
+func (dsp *MapleDb) GetWorkflowStatus(wfCtx *WorkflowInstance, log *Logger) (string, error) {
 	dsp.mtx.Lock()
 	defer dsp.mtx.Unlock()
 	return dsp._GetWorkflowStatus(wfCtx, log)
 }
 
-func (dsp *MapleDb) GetWorkflowsByStatus(log *Logger, status ...string) ([]*WorkflowContext, error) {
+func (dsp *MapleDb) GetWorkflowsByStatus(log *Logger, status ...string) ([]*WorkflowInstance, error) {
 	dsp.mtx.Lock()
 	defer dsp.mtx.Unlock()
 	db := dsp.db
@@ -363,7 +363,7 @@ func (dsp *MapleDb) GetWorkflowsByStatus(log *Logger, status ...string) ([]*Work
 	}
 	defer rows.Close()
 
-	var contexts []*WorkflowContext
+	var contexts []*WorkflowInstance
 	for rows.Next() {
 		var id int64
 		err = rows.Scan(&id)
@@ -385,7 +385,7 @@ func (dsp *MapleDb) GetWorkflowsByStatus(log *Logger, status ...string) ([]*Work
 	return contexts, nil
 }
 
-func (dsp *MapleDb) _GetWorkflowStatus(wfCtx *WorkflowContext, log *Logger) (string, error) {
+func (dsp *MapleDb) _GetWorkflowStatus(wfCtx *WorkflowInstance, log *Logger) (string, error) {
 	db := dsp.db
 	var query = `SELECT status FROM workflow_status WHERE workflow_id=? ORDER BY datetime(date) DESC, id DESC LIMIT 1`
 	log.DbQuery(query, strconv.FormatInt(wfCtx.primaryKey, 10))
@@ -411,10 +411,10 @@ func (dsp *MapleDb) _GetJobStatus(jobId int64, log *Logger) (string, error) {
 	return status, nil
 }
 
-func (dsp *MapleDb) _LoadWorkflowPK(log *Logger, primaryKey int64) (*WorkflowContext, error) {
+func (dsp *MapleDb) _LoadWorkflowPK(log *Logger, primaryKey int64) (*WorkflowInstance, error) {
 	db := dsp.db
-	// TODO: consolidate creation of WorkflowContext.  e.g. hard to set ctx.jobsMutex
-	var context WorkflowContext
+	// TODO: consolidate creation of WorkflowInstance.  e.g. hard to set ctx.jobsMutex
+	var context WorkflowInstance
 	var jobsMutex sync.Mutex
 	context.jobsMutex = &jobsMutex
 	context.primaryKey = primaryKey
@@ -430,12 +430,12 @@ func (dsp *MapleDb) _LoadWorkflowPK(log *Logger, primaryKey int64) (*WorkflowCon
 	return dsp._LoadWorkflowSources(log, &context, primaryKey)
 }
 
-func (dsp *MapleDb) _LoadWorkflowSources(log *Logger, context *WorkflowContext, primaryKey int64) (*WorkflowContext, error) {
+func (dsp *MapleDb) _LoadWorkflowSources(log *Logger, context *WorkflowInstance, primaryKey int64) (*WorkflowInstance, error) {
 	db := dsp.db
 	var sources WorkflowSources
 	var err error
 
-	context.done = make(chan *WorkflowContext)
+	context.done = make(chan *WorkflowInstance)
 	context.status, err = dsp._GetWorkflowStatus(context, log)
 	if err != nil {
 		return nil, err
