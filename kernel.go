@@ -43,35 +43,38 @@ type JobInstance struct {
 	log        *Logger
 }
 
-func (ji *JobInstance) run(backend Backend, cmd *exec.Cmd, done chan<- *JobInstance, jobCtx context.Context) {
-	var cmdDone = make(chan bool, 1)
+func (ji *JobInstance) setStatus(status string) {
+	if status == ji.status {
+		ji.log.Info("warning: already has status %s", status)
+		return
+	}
+	ji.db.SetJobStatus(ji.primaryKey, status, ji.log)
+	ji.log.Info("status change %s -> %s", ji.status, status)
+	ji.status = status
+}
+
+func (ji *JobInstance) run(backend Backend, cmd *exec.Cmd, done chan<- *JobInstance, ctx context.Context) {
+	var backendJobDone = make(chan bool, 1)
 	var isAborting = false
 	var log = ji.log.ForJob(ji.wi.uuid, ji)
 	log.Info("run: enter")
 	defer log.Info("run: exit")
-	subprocessCtx, subprocessCancel := context.WithCancel(jobCtx)
+	backendJobCtx, backendJobCancel := context.WithCancel(ctx)
 
-	// TODO: Maybe just a check that current state != new state
-	//////// for both this and workflow status
-	if ji.status == "NotStarted" {
-		// TODO: move this to ji.SetStatus()
-		ji.db.SetJobStatus(ji, "Started", log)
-	}
+	ji.setStatus("Started")
 
-	backend.Submit(cmdDone, subprocessCtx)
+	backend.Submit(backendJobDone, backendJobCtx)
 
 	for {
 		select {
-		case <-cmdDone:
-			var status = "Done"
-			log.Info("run: done (status %s)", status)
-			ji.db.SetJobStatus(ji, status, log)
+		case <-backendJobDone:
+			ji.setStatus("Done")
 			done <- ji
 			return
-		case <-jobCtx.Done():
+		case <-ctx.Done():
 			if !isAborting {
 				log.Info("run: abort")
-				subprocessCancel()
+				backendJobCancel()
 				isAborting = true
 			}
 		}
@@ -101,15 +104,15 @@ func (wi *WorkflowInstance) Status() string {
 }
 
 // TODO: this algorithm could use some work
-func (ctx *WorkflowInstance) isTerminal(aborting bool) bool {
-	ctx.jobsMutex.Lock()
-	defer ctx.jobsMutex.Unlock()
+func (wi *WorkflowInstance) isTerminal() bool {
+	wi.jobsMutex.Lock()
+	defer wi.jobsMutex.Unlock()
 
-	if !aborting && len(ctx.jobs) != len(ctx.source.graph().nodes) {
+	if !wi.aborting && len(wi.jobs) != len(wi.source.graph().nodes) {
 		return false
 	}
 
-	for _, job := range ctx.jobs {
+	for _, job := range wi.jobs {
 		if job.status == "Started" || job.status == "NotStarted" {
 			return false
 		}
@@ -118,8 +121,12 @@ func (ctx *WorkflowInstance) isTerminal(aborting bool) bool {
 }
 
 func (wi *WorkflowInstance) setStatus(status string) {
-	// TODO: don't allow SetWorkflowStatus to modify the pointer,
-	wi.db.SetWorkflowStatus(wi, status, wi.log)
+	if status == wi.status {
+		wi.log.Info("warning: already has status %s", status)
+		return
+	}
+	wi.log.Info("status change %s -> %s", wi.status, status)
+	wi.db.SetWorkflowStatus(wi.primaryKey, status, wi.log)
 	wi.status = status
 }
 
@@ -152,7 +159,7 @@ func (wi *WorkflowInstance) doneJobsHandler(doneJobs <-chan *JobInstance, runnab
 
 	for doneJob := range doneJobs {
 		// TODO: yuck
-		if wi.isTerminal(wi.aborting) {
+		if wi.isTerminal() {
 			workflowDone <- true
 			return
 		} else if !wi.aborting {
@@ -163,7 +170,6 @@ func (wi *WorkflowInstance) doneJobsHandler(doneJobs <-chan *JobInstance, runnab
 			}()
 		}
 	}
-
 }
 
 func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Context) {
@@ -173,9 +179,7 @@ func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Conte
 	log.Info("run: enter")
 	defer log.Info("run: exit")
 
-	if wi.status == "NotStarted" {
-		wi.setStatus("Started")
-	}
+	wi.setStatus("Started")
 
 	var jobDone = make(chan *JobInstance)
 	var workflowDone = make(chan bool)
@@ -227,15 +231,15 @@ func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Conte
 				log.Info("workflow: completed")
 				wi.setStatus("Done")
 				return
-			case call := <-jobDone:
-				log.Info("workflow: job finished: %s", call.status)
-				doneJobs <- call
+			case job := <-jobDone:
+				log.Info("workflow: job finished: %s", job.status)
+				doneJobs <- job
 			case <-ctx.Done():
 				// this is for cancellations AND timeouts
-				log.Info("workflow: aborting...")
+				log.Info("workflow: shutdown...")
 				abortJobs()
 
-				if wi.isTerminal(true) {
+				if wi.isTerminal() {
 					return
 				}
 			}
@@ -265,6 +269,13 @@ func (kernel *Kernel) run(ctx context.Context) {
 
 	log.Info("kernel: enter")
 	defer func() {
+		kernel.mutex.Lock()
+		kernel.on = false
+		kernel.mutex.Unlock()
+		for wi, _ := range kernel.running {
+			wi.cancel()
+		}
+
 		// TODO: add a waitGroup to wait for all workflow goroutines to exit
 		kernel.waitGroup.Done()
 		log.Info("kernel: exit")
@@ -277,16 +288,6 @@ func (kernel *Kernel) run(ctx context.Context) {
 			kernel.enqueue(wi, time.Minute)
 		}
 	}()
-
-	// TODO: can this be replaced with a defer function?  Returning from run() implies the kernel is not on anymore.
-	var shutdown = func() {
-		kernel.mutex.Lock()
-		kernel.on = false
-		kernel.mutex.Unlock()
-		for wi, _ := range kernel.running {
-			wi.cancel()
-		}
-	}
 
 	var processDone = func(result *WorkflowInstance) {
 		log.Info("kernel: workflow %s finished: %s", result.uuid, result.status)
@@ -323,14 +324,14 @@ func (kernel *Kernel) run(ctx context.Context) {
 			case d := <-workflowDone:
 				processDone(d)
 			case <-ctx.Done():
-				shutdown()
+				return
 			}
 		} else {
 			select {
 			case d := <-workflowDone:
 				processDone(d)
 			case <-ctx.Done():
-				shutdown()
+				return
 			}
 		}
 	}
@@ -342,10 +343,9 @@ func (kernel Kernel) signalHandler() {
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func(kernel Kernel) {
 		sig := <-sigs
-		kernel.log.Info("%s signal detected... aborting dispatcher", sig)
-		kernel.log.Info("%s signal detected... abort turned off", sig)
-		//kernel.Abort()
-		//kernel.log.Info("%s signal detected... aborted dispatcher", sig)
+		kernel.log.Info("%s signal detected... turning off kernel", sig)
+		kernel.cancel()
+		kernel.log.Info("%s signal detected... kernel off", sig)
 		os.Exit(130)
 	}(kernel)
 }

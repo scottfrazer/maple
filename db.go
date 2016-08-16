@@ -192,18 +192,17 @@ func (dsp *MapleDb) NewJob(wfCtx *WorkflowInstance, node *Node, log *Logger) (*J
 	return &ctx, nil
 }
 
-func (dsp *MapleDb) SetJobStatus(jobCtx *JobInstance, status string, log *Logger) (bool, error) {
+func (dsp *MapleDb) SetJobStatus(primaryKey int64, status string, log *Logger) (bool, error) {
 	dsp.mtx.Lock()
 	defer dsp.mtx.Unlock()
 	db := dsp.db
 	var nowISO8601 = time.Now().Format("2006-01-02 15:04:05.999")
 	var query = `INSERT INTO job_status (job_id, status, date) VALUES (?, ?, ?)`
-	log.DbQuery(query, strconv.FormatInt(jobCtx.primaryKey, 10), status, nowISO8601)
-	_, err := db.Exec(query, jobCtx.primaryKey, status, nowISO8601)
+	log.DbQuery(query, strconv.FormatInt(primaryKey, 10), status, nowISO8601)
+	_, err := db.Exec(query, primaryKey, status, nowISO8601)
 	if err != nil {
 		return false, err
 	}
-	jobCtx.status = status
 	return true, nil
 }
 
@@ -322,18 +321,17 @@ func (dsp *MapleDb) LoadWorkflow(uuid uuid.UUID, log *Logger) (*WorkflowInstance
 	return dsp._LoadWorkflowSources(log, &context, context.primaryKey)
 }
 
-func (dsp *MapleDb) SetWorkflowStatus(wfCtx *WorkflowInstance, status string, log *Logger) (bool, error) {
+func (dsp *MapleDb) SetWorkflowStatus(primaryKey int64, status string, log *Logger) (bool, error) {
 	dsp.mtx.Lock()
 	defer dsp.mtx.Unlock()
 	db := dsp.db
 	var nowISO8601 = time.Now().Format("2006-01-02 15:04:05.999")
 	var query = `INSERT INTO workflow_status (workflow_id, status, date) VALUES (?, ?, ?)`
-	log.DbQuery(query, strconv.FormatInt(wfCtx.primaryKey, 10), status, nowISO8601)
-	_, err := db.Exec(query, wfCtx.primaryKey, status, nowISO8601)
+	log.DbQuery(query, strconv.FormatInt(primaryKey, 10), status, nowISO8601)
+	_, err := db.Exec(query, primaryKey, status, nowISO8601)
 	if err != nil {
 		return false, err
 	}
-	wfCtx.status = status
 	return true, nil
 }
 
@@ -420,6 +418,7 @@ func (dsp *MapleDb) _LoadWorkflowPK(log *Logger, primaryKey int64) (*WorkflowIns
 	var jobsMutex sync.Mutex
 	context.jobsMutex = &jobsMutex
 	context.primaryKey = primaryKey
+	context.log = log
 
 	query := `SELECT uuid FROM workflow WHERE id=?`
 	log.DbQuery(query, strconv.FormatInt(primaryKey, 10))
@@ -467,6 +466,7 @@ func (dsp *MapleDb) _LoadWorkflowSources(log *Logger, context *WorkflowInstance,
 	var jobs []*JobInstance
 	for rows.Next() {
 		var job JobInstance
+		job.log = log
 		var name string
 
 		err = rows.Scan(&job.primaryKey, &name, &job.shard, &job.attempt)
