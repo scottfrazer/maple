@@ -43,7 +43,7 @@ type JobInstance struct {
 	log        *Logger
 }
 
-func (ji *JobInstance) run(cmd *exec.Cmd, done chan<- *JobInstance, jobCtx context.Context) {
+func (ji *JobInstance) run(backend Backend, cmd *exec.Cmd, done chan<- *JobInstance, jobCtx context.Context) {
 	var cmdDone = make(chan bool, 1)
 	var isAborting = false
 	var log = ji.log.ForJob(ji.wi.uuid, ji)
@@ -58,32 +58,12 @@ func (ji *JobInstance) run(cmd *exec.Cmd, done chan<- *JobInstance, jobCtx conte
 		ji.db.SetJobStatus(ji, "Started", log)
 	}
 
-	// TODO: this would be a backend function
-	go func(done chan<- bool, ctx context.Context) {
-		select {
-		case <-time.After(time.Second * 5):
-		case <-ctx.Done():
-		}
-		//cmd.Run()
-		done <- true
-	}(cmdDone, subprocessCtx)
-
-	/*var kill = func(status string) {
-		err := cmd.Process.Kill()
-		if err != nil {
-			panic(err)
-		}
-	}*/
+	backend.Submit(cmdDone, subprocessCtx)
 
 	for {
 		select {
 		case <-cmdDone:
 			var status = "Done"
-			/*if cmd.ProcessState == nil {
-				status = "no-create"
-			} else if !cmd.ProcessState.Success() {
-				status = "failed"
-			}*/
 			log.Info("run: done (status %s)", status)
 			ji.db.SetJobStatus(ji, status, log)
 			done <- ji
@@ -188,6 +168,7 @@ func (wi *WorkflowInstance) doneJobsHandler(doneJobs <-chan *JobInstance, runnab
 
 func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Context) {
 	var log = wi.log.ForWorkflow(wi.uuid)
+	backend := NewLocalBackend()
 
 	log.Info("run: enter")
 	defer log.Info("run: exit")
@@ -241,7 +222,7 @@ func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Conte
 				log.Info("workflow: launching call: %s", job.node.String())
 				ctx, cancel := context.WithCancel(context.Background())
 				job.cancel = cancel
-				go job.run(exec.Command("sleep", "2"), jobDone, ctx)
+				go job.run(backend, exec.Command("sleep", "2"), jobDone, ctx)
 			case <-workflowDone:
 				log.Info("workflow: completed")
 				wi.setStatus("Done")

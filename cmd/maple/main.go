@@ -1,6 +1,5 @@
 package main
 
-import "time"
 import (
 	"bytes"
 	"encoding/json"
@@ -139,10 +138,6 @@ func main() {
 	case server.FullCommand():
 		logger := maple.NewLogger().ToFile(*logPath).ToWriter(os.Stdout)
 		kernel := maple.NewKernel(logger, *dbDriver, *dbConnection, *concurrentWf, *queueSize)
-
-		kernel.On()
-		time.Sleep(time.Millisecond * 5)
-		kernel.Off()
 		kernel.On()
 
 		http.HandleFunc("/submit", maple.SubmitHttpEndpoint(kernel))
