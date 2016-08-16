@@ -56,7 +56,7 @@ func (ji *JobInstance) setStatus(status string) {
 func (ji *JobInstance) run(backend Backend, cmd *exec.Cmd, done chan<- *JobInstance, ctx context.Context) {
 	var backendJobDone = make(chan bool, 1)
 	var isAborting = false
-	var log = ji.log.ForJob(ji.wi.uuid, ji)
+	log := ji.log
 	log.Info("run: enter")
 	defer log.Info("run: exit")
 	backendJobCtx, backendJobCancel := context.WithCancel(ctx)
@@ -130,11 +130,29 @@ func (wi *WorkflowInstance) setStatus(status string) {
 	wi.status = status
 }
 
+func (wi *WorkflowInstance) newJob(node *Node) (*JobInstance, error) {
+	job := JobInstance{
+		primaryKey: -1,
+		node:       node,
+		shard:      0,
+		attempt:    1,
+		status:     "NotStarted",
+		cancel:     func() {},
+		wi:         wi,
+		db:         wi.db,
+		log:        wi.log.ForJob(wi.uuid, node.name)}
+	err := wi.db.NewJob(&job, wi.log)
+	if err != nil {
+		return nil, err
+	}
+	return &job, nil
+}
+
 func (wi *WorkflowInstance) doneJobsHandler(doneJobs <-chan *JobInstance, runnableJobs chan<- *JobInstance, workflowDone chan<- bool) {
 	graph := wi.source.graph()
 
 	var launch = func(node *Node) {
-		job, err := wi.db.NewJob(wi, node, wi.log)
+		job, err := wi.newJob(node)
 		if err != nil {
 			// TODO: don't panic
 			panic(err)

@@ -44,8 +44,8 @@ func (log *Logger) ForWorkflow(uuid uuid.UUID) *Logger {
 	return &Logger{prefix, log.writer, log.mutex, log.wfLogsPath, log.callLogsPath, log.logQueries}
 }
 
-func (log *Logger) ForJob(uuid uuid.UUID, job *JobInstance) *Logger {
-	prefix := fmt.Sprintf("[%s:%s] ", uuid.String()[:8], job.node.name)
+func (log *Logger) ForJob(uuid uuid.UUID, jobTag string) *Logger {
+	prefix := fmt.Sprintf("[%s:%s] ", uuid.String()[:8], jobTag)
 	return &Logger{prefix, log.writer, log.mutex, log.wfLogsPath, log.callLogsPath, log.logQueries}
 }
 

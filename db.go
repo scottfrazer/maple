@@ -126,12 +126,12 @@ func (dsp *MapleDb) setup() {
 	}
 }
 
-func (dsp *MapleDb) NewJob(wfCtx *WorkflowInstance, node *Node, log *Logger) (*JobInstance, error) {
+func (dsp *MapleDb) NewJob(ji *JobInstance, log *Logger) error {
 	dsp.mtx.Lock()
 	defer dsp.mtx.Unlock()
 	db := dsp.db
 	var success = false
-	var jobId int64 = -1
+	var primaryKey int64 = -1
 
 	tx, err := db.Begin()
 
@@ -146,50 +146,50 @@ func (dsp *MapleDb) NewJob(wfCtx *WorkflowInstance, node *Node, log *Logger) (*J
 	}()
 
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	query := `INSERT INTO job (workflow_id, call_fqn, shard, attempt) VALUES (?, ?, ?, ?)`
-	log.DbQuery(query, strconv.FormatInt(wfCtx.primaryKey, 10), node.name, "0", "1")
-	res, err := tx.Exec(query, wfCtx.primaryKey, node.name, 0, 1)
+	log.DbQuery(query, strconv.FormatInt(ji.wi.primaryKey, 10), ji.node.name, "0", "1")
+	res, err := tx.Exec(query, ji.wi.primaryKey, ji.node.name, 0, 1)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	jobId, err = res.LastInsertId()
+	primaryKey, err = res.LastInsertId()
 	if err != nil {
-		return nil, err
+		return err
 	}
+	ji.primaryKey = primaryKey
 
 	rows, err := res.RowsAffected()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	if rows != 1 {
-		return nil, errors.New("could not insert into 'job' table")
+		return errors.New("could not insert into 'job' table")
 	}
 
 	now := time.Now().Format("2006-01-02 15:04:05.999")
-	query = `INSERT INTO job_status (job_id, status, date) VALUES (?, 'NotStarted', ?)`
-	log.DbQuery(query, strconv.FormatInt(jobId, 10), now)
-	res, err = tx.Exec(query, jobId, now)
+	query = `INSERT INTO job_status (job_id, status, date) VALUES (?, ?, ?)`
+	log.DbQuery(query, strconv.FormatInt(ji.primaryKey, 10), ji.status, now)
+	res, err = tx.Exec(query, primaryKey, ji.status, now)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	rows, err = res.RowsAffected()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	if rows != 1 {
-		return nil, errors.New("could not insert into 'job_status' table")
+		return errors.New("could not insert into 'job_status' table")
 	}
 
-	ctx := JobInstance{jobId, node, 0, 1, "NotStarted", func() {}, wfCtx, dsp, log}
 	success = true
-	return &ctx, nil
+	return nil
 }
 
 func (dsp *MapleDb) SetJobStatus(primaryKey int64, status string, log *Logger) (bool, error) {
