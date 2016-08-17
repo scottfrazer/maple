@@ -212,12 +212,12 @@ func (dsp *MapleDb) GetJobStatus(jobId int64, log *Logger) (string, error) {
 	return dsp._GetJobStatus(jobId, log)
 }
 
-func (dsp *MapleDb) NewWorkflow(uuid uuid.UUID, sources *WorkflowSources, log *Logger) (*WorkflowInstance, error) {
+func (dsp *MapleDb) NewWorkflow(wi *WorkflowInstance, log *Logger) error {
 	dsp.mtx.Lock()
 	defer dsp.mtx.Unlock()
 	db := dsp.db
 	var success = false
-	var workflowId int64 = -1
+	var primaryKey int64 = -1
 
 	tx, err := db.Begin()
 
@@ -232,84 +232,65 @@ func (dsp *MapleDb) NewWorkflow(uuid uuid.UUID, sources *WorkflowSources, log *L
 	}()
 
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	query := `INSERT INTO workflow (uuid) VALUES (?)`
-	log.DbQuery(query, uuid.String())
-	res, err := tx.Exec(query, uuid)
+	log.DbQuery(query, wi.uuid.String())
+	res, err := tx.Exec(query, wi.uuid)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	workflowId, err = res.LastInsertId()
+	primaryKey, err = res.LastInsertId()
 	if err != nil {
-		return nil, err
+		return err
 	}
+	wi.primaryKey = primaryKey
 
 	rows, err := res.RowsAffected()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	if rows != 1 {
-		return nil, errors.New("could not insert into 'workflow' table")
+		return errors.New("could not insert into 'workflow' table")
 	}
 
 	query = `INSERT INTO workflow_sources (workflow_id, wdl, inputs, options) VALUES (?, ?, ?, ?)`
-	log.DbQuery(query, strconv.FormatInt(workflowId, 10), "{omit}", "{omit}", "{omit}")
-	res, err = tx.Exec(query, workflowId, sources.wdl, sources.inputs, sources.options)
+	log.DbQuery(query, strconv.FormatInt(wi.primaryKey, 10), "{omit}", "{omit}", "{omit}")
+	res, err = tx.Exec(query, wi.primaryKey, wi.source.wdl, wi.source.inputs, wi.source.options)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	rows, err = res.RowsAffected()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	if rows != 1 {
-		return nil, errors.New("could not insert into 'workflow_sources' table")
+		return errors.New("could not insert into 'workflow_sources' table")
 	}
 
 	now := time.Now().Format("2006-01-02 15:04:05.999")
-	query = `INSERT INTO workflow_status (workflow_id, status, date) VALUES (?, 'NotStarted', ?)`
-	log.DbQuery(query, strconv.FormatInt(workflowId, 10), now)
-	res, err = tx.Exec(query, workflowId, now)
+	query = `INSERT INTO workflow_status (workflow_id, status, date) VALUES (?, ?, ?)`
+	log.DbQuery(query, strconv.FormatInt(wi.primaryKey, 10), wi.status, now)
+	res, err = tx.Exec(query, wi.primaryKey, wi.status, now)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	rows, err = res.RowsAffected()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	if rows != 1 {
-		return nil, errors.New("could not insert into 'workflow_status' table")
+		return errors.New("could not insert into 'workflow_status' table")
 	}
-
-	var jobsMutex sync.Mutex
-	var stateMutex sync.Mutex
-
-	// TODO: some kind of constructor for this?
-	ctx := WorkflowInstance{
-		uuid:         uuid,
-		primaryKey:   workflowId,
-		done:         make(chan *WorkflowInstance, 1),
-		source:       sources,
-		status:       "NotStarted",
-		jobs:         nil,
-		jobsMutex:    &jobsMutex,
-		stateMutex:   &stateMutex,
-		cancel:       func() {},
-		abort:        func() {},
-		shuttingDown: false,
-		aborting:     false,
-		db:           dsp,
-		log:          log.ForWorkflow(uuid)}
 	success = true
-	return &ctx, nil
+	return nil
 }
 
 func (dsp *MapleDb) LoadWorkflow(uuid uuid.UUID, log *Logger) (*WorkflowInstance, error) {

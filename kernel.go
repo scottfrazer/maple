@@ -90,7 +90,6 @@ type WorkflowInstance struct {
 	status       string
 	jobs         []*JobInstance
 	jobsMutex    *sync.Mutex
-	stateMutex   *sync.Mutex
 	cancel       func()
 	abort        func()
 	shuttingDown bool
@@ -155,8 +154,8 @@ func (wi *WorkflowInstance) newJob(node *Node) (*JobInstance, error) {
 }
 
 func (wi *WorkflowInstance) isAcceptingJobs() bool {
-	wi.stateMutex.Lock()
-	defer wi.stateMutex.Unlock()
+	wi.jobsMutex.Lock()
+	defer wi.jobsMutex.Unlock()
 	return wi.shuttingDown == false && wi.aborting == false
 }
 
@@ -408,6 +407,32 @@ func (kernel *Kernel) enqueue(ctx *WorkflowInstance, timeout time.Duration) erro
 	return nil
 }
 
+func (kernel *Kernel) newWorkflow(uuid uuid.UUID, source *WorkflowSources) (*WorkflowInstance, error) {
+	var jobsMutex sync.Mutex
+
+	wi := &WorkflowInstance{
+		uuid:         uuid,
+		primaryKey:   -1,
+		done:         make(chan *WorkflowInstance, 1),
+		source:       source,
+		status:       "NotStarted",
+		jobs:         nil,
+		jobsMutex:    &jobsMutex,
+		cancel:       func() {},
+		abort:        func() {},
+		shuttingDown: false,
+		aborting:     false,
+		db:           kernel.db,
+		log:          kernel.log.ForWorkflow(uuid)}
+
+	err := kernel.db.NewWorkflow(wi, kernel.log)
+	if err != nil {
+		return nil, err
+	}
+
+	return wi, nil
+}
+
 func NewKernel(log *Logger, dbName string, dbConnection string, concurrentWorkflows int, submitQueueSize int) *Kernel {
 	var wg sync.WaitGroup
 	var mutex sync.Mutex
@@ -464,13 +489,12 @@ func (kernel *Kernel) Run(wdl, inputs, options string, id uuid.UUID) (*WorkflowI
 
 func (kernel *Kernel) Submit(wdl, inputs, options string, id uuid.UUID, timeout time.Duration) (*WorkflowInstance, error) {
 	sources := WorkflowSources{strings.TrimSpace(wdl), strings.TrimSpace(inputs), strings.TrimSpace(options), nil}
-	log := kernel.log.ForWorkflow(id)
-	ctx, err := kernel.db.NewWorkflow(id, &sources, log)
+	wi, err := kernel.newWorkflow(id, &sources)
 	if err != nil {
 		return nil, err
 	}
-	kernel.enqueue(ctx, timeout)
-	return ctx, nil
+	kernel.enqueue(wi, timeout)
+	return wi, nil
 }
 
 func (kernel *Kernel) Abort(id uuid.UUID, timeout time.Duration) error {
