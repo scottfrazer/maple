@@ -108,22 +108,21 @@ func (wi *WorkflowInstance) Status() string {
 }
 
 // TODO: this algorithm could use some work
-func (wi *WorkflowInstance) isTerminal() bool {
+func (wi *WorkflowInstance) isTerminal() *string {
 	wi.jobsMutex.Lock()
 	defer wi.jobsMutex.Unlock()
-	wi.stateMutex.Lock()
-	defer wi.stateMutex.Unlock()
 
-	if !wi.shuttingDown && len(wi.jobs) != len(wi.source.graph().nodes) {
-		return false
-	}
+	status := "Done"
 
 	for _, job := range wi.jobs {
+		if job.status != "Done" {
+			status = "Failed"
+		}
 		if job.status == "Started" || job.status == "NotStarted" {
-			return false
+			return nil
 		}
 	}
-	return true
+	return &status
 }
 
 func (wi *WorkflowInstance) setStatus(status string) {
@@ -161,16 +160,29 @@ func (wi *WorkflowInstance) isAcceptingJobs() bool {
 	return wi.shuttingDown == false && wi.aborting == false
 }
 
-func (wi *WorkflowInstance) doneJobsHandler(doneJobs <-chan *JobInstance, runnableJobs chan<- *JobInstance, workflowDone chan<- bool) {
+func (wi *WorkflowInstance) doneJobsHandler(doneJobs <-chan *JobInstance, runnableJobs chan<- *JobInstance, workflowDone chan<- string) {
 	graph := wi.source.graph()
 
 	var launch = func(job *JobInstance) {
 		if wi.isAcceptingJobs() {
-			wi.jobsMutex.Lock()
-			wi.jobs = append(wi.jobs, job)
-			wi.jobsMutex.Unlock()
 			runnableJobs <- job
 		}
+	}
+
+	var persist = func(nodes []*Node) []*JobInstance {
+		jobs := make([]*JobInstance, len(nodes))
+		for index, node := range nodes {
+			job, err := wi.newJob(node)
+			if err != nil {
+				// TODO: don't panic, should fail workflow
+				panic(err)
+			}
+			wi.jobsMutex.Lock()
+			jobs[index] = job
+			wi.jobs = append(wi.jobs, job)
+			wi.jobsMutex.Unlock()
+		}
+		return jobs
 	}
 
 	if len(wi.jobs) > 0 {
@@ -182,33 +194,26 @@ func (wi *WorkflowInstance) doneJobsHandler(doneJobs <-chan *JobInstance, runnab
 		}
 	} else {
 		// Launching the root jobs
-		for _, root := range graph.Root() {
-			job, err := wi.newJob(root)
-			if err != nil {
-				// TODO: don't panic, should fail workflow
-				panic(err)
-			}
+		newJobs := persist(graph.Root())
+		for _, job := range newJobs {
 			launch(job)
 		}
 	}
 
 	for doneJob := range doneJobs {
-		downstream := graph.Downstream(doneJob.node)
-		jobs := make([]*JobInstance, len(downstream))
-		for index, node := range downstream {
-			job, err := wi.newJob(node)
-			if err != nil {
-				// TODO: don't panic, should fail workflow
-				panic(err)
-			}
-			jobs[index] = job
-		}
+		// Persist all new downstream nodes to the database first
+		jobs := persist(graph.Downstream(doneJob.node))
 
-		if wi.isTerminal() {
-			workflowDone <- true
+		// If at this stage every job is in a terminal state, the workflow is done.
+		terminalStatus := wi.isTerminal()
+		if terminalStatus != nil {
+			wi.setStatus(*terminalStatus)
+			workflowDone <- *terminalStatus
 			return
 		}
 
+		// Use goroutine to submit jobs to the channel so this goroutine doesn't block
+		// TODO: no exit strategy!  Have this take a context.Context and use select {}
 		go func(newJobs []*JobInstance) {
 			for _, job := range newJobs {
 				launch(job)
@@ -227,11 +232,12 @@ func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Conte
 	wi.setStatus("Started")
 
 	var jobDone = make(chan *JobInstance)
-	var workflowDone = make(chan bool)
+	var workflowDone = make(chan string)
 	var runnableJobs = make(chan *JobInstance)
 	var doneJobs = make(chan *JobInstance)
 
 	defer func() {
+		log.Info("workflow: exiting with state: %s", wi.status)
 		wi.done <- wi
 		close(wi.done)
 		close(doneJobs)
@@ -244,11 +250,6 @@ func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Conte
 		if wi.isAcceptingJobs() == false {
 			select {
 			case <-workflowDone:
-				log.Info("workflow: completed")
-				// TODO: set status (even Aborted) here
-				if wi.status != "Aborted" {
-					wi.setStatus("Done")
-				}
 				return
 			case job := <-jobDone:
 				log.Info("workflow: job finished: %s", job.status)
@@ -262,14 +263,11 @@ func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Conte
 				job.cancel = cancel
 				go job.run(backend, exec.Command("sleep", "2"), jobDone, ctx)
 			case <-workflowDone:
-				log.Info("workflow: completed")
-				wi.setStatus("Done")
 				return
 			case job := <-jobDone:
 				log.Info("workflow: job finished: %s", job.status)
 				doneJobs <- job
 			case <-ctx.Done():
-				// this is for cancellations AND timeouts
 				log.Info("workflow: shutdown...")
 				wi.jobsMutex.Lock()
 				wi.shuttingDown = true
@@ -344,8 +342,8 @@ func (kernel *Kernel) run(ctx context.Context) {
 				return
 			}
 			select {
-			case d := <-workflowDone:
-				processDone(d)
+			case wi := <-workflowDone:
+				processDone(wi)
 			}
 		} else if workers < kernel.maxWorkers {
 			select {
@@ -366,15 +364,15 @@ func (kernel *Kernel) run(ctx context.Context) {
 						context.cancel()
 					}
 				}
-			case d := <-workflowDone:
-				processDone(d)
+			case wi := <-workflowDone:
+				processDone(wi)
 			case <-ctx.Done():
 				return
 			}
 		} else {
 			select {
-			case d := <-workflowDone:
-				processDone(d)
+			case wi := <-workflowDone:
+				processDone(wi)
 			case <-ctx.Done():
 				return
 			}
@@ -457,11 +455,11 @@ func (kernel *Kernel) Off() {
 }
 
 func (kernel *Kernel) Run(wdl, inputs, options string, id uuid.UUID) (*WorkflowInstance, error) {
-	ctx, err := kernel.Submit(wdl, inputs, options, id, time.Hour)
+	wi, err := kernel.Submit(wdl, inputs, options, id, time.Hour)
 	if err != nil {
 		return nil, err
 	}
-	return <-ctx.done, nil
+	return <-wi.done, nil
 }
 
 func (kernel *Kernel) Submit(wdl, inputs, options string, id uuid.UUID, timeout time.Duration) (*WorkflowInstance, error) {
