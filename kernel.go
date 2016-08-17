@@ -248,6 +248,7 @@ func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Conte
 	for {
 		if wi.isAcceptingJobs() == false {
 			select {
+			case <-runnableJobs:
 			case <-workflowDone:
 				return
 			case job := <-jobDone:
@@ -322,6 +323,7 @@ func (kernel *Kernel) run(ctx context.Context) {
 	}()
 
 	go func() {
+		// TODO: returns PKs?  then loadWorkflow(workflowPk)
 		restartable, _ := kernel.db.GetWorkflowsByStatus(log, "Started")
 		for _, wi := range restartable {
 			log.Info("kernel: resume workflow %s", wi.uuid)

@@ -20,6 +20,40 @@ type MapleDb struct {
 	mtx            *sync.Mutex
 }
 
+type WorkflowEntry struct {
+	primaryKey    int64
+	uuid          uuid.UUID
+	statusEntries []*WorkflowStatusEntry
+	sources       *WorkflowSourcesEntry
+}
+
+type WorkflowStatusEntry struct {
+	primaryKey int64
+	status     string
+	date       time.Time
+}
+
+type WorkflowSourcesEntry struct {
+	primaryKey int64
+	wdl        string
+	inputs     string
+	options    string
+}
+
+type JobEntry struct {
+	primaryKey    int64
+	fqn           string
+	shard         int
+	attempt       int
+	statusEntries []*JobStatusEntry
+}
+
+type JobStatusEntry struct {
+	primaryKey int64
+	status     string
+	date       time.Time
+}
+
 func NewMapleDb(driverName, dataSourceName string, log *Logger) *MapleDb {
 	db, err := sql.Open(driverName, dataSourceName)
 	if err != nil {
@@ -357,7 +391,7 @@ func (dsp *MapleDb) GetWorkflowsByStatus(log *Logger, status ...string) ([]*Work
 	}
 	defer rows.Close()
 
-	var contexts []*WorkflowInstance
+	var wis []*WorkflowInstance
 	for rows.Next() {
 		var id int64
 		err = rows.Scan(&id)
@@ -368,7 +402,7 @@ func (dsp *MapleDb) GetWorkflowsByStatus(log *Logger, status ...string) ([]*Work
 		if err != nil {
 			return nil, err
 		}
-		contexts = append(contexts, context)
+		wis = append(wis, context)
 	}
 
 	err = rows.Err()
@@ -376,7 +410,7 @@ func (dsp *MapleDb) GetWorkflowsByStatus(log *Logger, status ...string) ([]*Work
 		return nil, err
 	}
 
-	return contexts, nil
+	return wis, nil
 }
 
 func (dsp *MapleDb) _GetWorkflowStatus(wfCtx *WorkflowInstance, log *Logger) (string, error) {
@@ -457,10 +491,12 @@ func (dsp *MapleDb) _LoadWorkflowSources(log *Logger, context *WorkflowInstance,
 	}
 	defer rows.Close()
 
+	// TODO: should we be creating JobInstances at this level?
 	var jobs []*JobInstance
 	for rows.Next() {
 		var job JobInstance
 		job.log = log
+		job.db = dsp
 		var name string
 
 		err = rows.Scan(&job.primaryKey, &name, &job.shard, &job.attempt)
