@@ -290,11 +290,24 @@ func (dsp *MapleDb) NewWorkflow(uuid uuid.UUID, sources *WorkflowSources, log *L
 	}
 
 	var jobsMutex sync.Mutex
+	var stateMutex sync.Mutex
 
 	// TODO: some kind of constructor for this?
 	ctx := WorkflowInstance{
-		uuid, workflowId, make(chan *WorkflowInstance, 1),
-		sources, "NotStarted", nil, &jobsMutex, func() {}, false, dsp, log.ForWorkflow(uuid)}
+		uuid:         uuid,
+		primaryKey:   workflowId,
+		done:         make(chan *WorkflowInstance, 1),
+		source:       sources,
+		status:       "NotStarted",
+		jobs:         nil,
+		jobsMutex:    &jobsMutex,
+		stateMutex:   &stateMutex,
+		cancel:       func() {},
+		abort:        func() {},
+		shuttingDown: false,
+		aborting:     false,
+		db:           dsp,
+		log:          log.ForWorkflow(uuid)}
 	success = true
 	return &ctx, nil
 }

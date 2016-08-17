@@ -23,6 +23,10 @@ The Kernel API will be a Go-only API that will allow submission, manipulation, a
 
 The Kernel is the only Maple API that's exported.  The Kernel will call into the Database layer.  Kernel should allow only non-destructive type pass-through functions, like GetWorkflowStatus(), but not SetWorkflowStatus(), and perhaps some minor repackaging of data (e.g. SnapshotOf() returning a *WorkflowInstance)
 
+"shutdown" refers to the tearing down of all goroutines and freeing up of resources that the kernel is holding onto.  On() Off() On() should act as if it was never shut down: it should resume running workflows, attaching to the jobs which should still be alive.
+
+"abort" only refers to a particular workflow or job, a kernel cannot be aborted.  If kernel.Off() is called when a workflow is aborting, kernel.On() should resume aborting the workflow.  Aborting a workflow will abort all jobs then mark itself as aborted.  Aborting a job will free the resources associated with that job (kill the subprocess, decomission VMs, shutdown EC2 nodes, etc).
+
 NewKernel(settings...) *Kernel
 kernel.On() - start goroutines, re-attach to existing jobs, start accepting submissions
 kernel.Off() - shut down all goroutines, stop accepting submissions, leave jobs running.
@@ -44,12 +48,6 @@ On Startup (always):
 
 * Check database state, fix anything weird (maybe server was shutdown prematurely)
 * Handle workflow FIFOs... maybe just reconnect to them, maybe remove them
-
-workflowDispatcher - struct that contains relevant information for the WF dispatcher.  wd.run() is main goroutine
-workflowInstance (formerly WorkflowInstance) - struct for workflow evaluation.
-    * wi.run() - main evaluation loop (currently wd.runWorkflow)
-    * wi.setStatus(newStatus string)
-jobInstance - ji.run()
 
 Database (db.go)
 ================
