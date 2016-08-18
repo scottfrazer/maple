@@ -54,11 +54,10 @@ func (ji *JobInstance) setStatus(status string) error {
 
 func (ji *JobInstance) run(backend Backend, cmd *exec.Cmd, done chan<- *JobInstance, ctx context.Context) {
 	var backendJobDone = make(chan bool, 1)
-	var isAborting = false
 	log := ji.log
 	log.Info("run: enter")
 	defer log.Info("run: exit")
-	backendJobCtx, backendJobCancel := context.WithCancel(ctx)
+	backendJobCtx, _ := context.WithCancel(ctx)
 
 	ji.setStatus("Started")
 
@@ -71,11 +70,9 @@ func (ji *JobInstance) run(backend Backend, cmd *exec.Cmd, done chan<- *JobInsta
 			done <- ji
 			return
 		case <-ctx.Done():
-			if !isAborting {
-				log.Info("run: abort")
-				backendJobCancel()
-				isAborting = true
-			}
+			log.Info("run: shutdown...")
+			<-backendJobDone
+			return
 		}
 	}
 }
@@ -142,21 +139,23 @@ func (wi *WorkflowInstance) setStatus(status string) error {
 	return nil
 }
 
-func (wi *WorkflowInstance) newJob(node *Node) (*JobInstance, error) {
+func (wi *WorkflowInstance) newJobInstance(node *Node) (*JobInstance, error) {
 	entry, err := wi.db.NewJobEntry(wi.entry.primaryKey, node.name, 0, 1, wi.log)
 	if err != nil {
 		return nil, err
 	}
 
-	job := JobInstance{
+	return wi.jobInstanceFromJobEntry(entry), nil
+}
+
+func (wi *WorkflowInstance) jobInstanceFromJobEntry(entry *JobEntry) *JobInstance {
+	return &JobInstance{
 		entry:  entry,
 		cancel: func() {},
 		abort:  func() {},
 		wi:     wi,
 		db:     wi.db,
-		log:    wi.log.ForJob(wi.Uuid(), node.name)}
-
-	return &job, nil
+		log:    wi.log.ForJob(wi.Uuid(), entry.fqn)}
 }
 
 func (wi *WorkflowInstance) isAcceptingJobs() bool {
@@ -175,7 +174,7 @@ func (wi *WorkflowInstance) doneJobsHandler(doneJobs <-chan *JobInstance, runnab
 	var persist = func(nodes []*Node) []*JobInstance {
 		jobs := make([]*JobInstance, len(nodes))
 		for index, node := range nodes {
-			job, err := wi.newJob(node)
+			job, err := wi.newJobInstance(node)
 			if err != nil {
 				// TODO: don't panic, should fail workflow
 				panic(err)
@@ -188,11 +187,12 @@ func (wi *WorkflowInstance) doneJobsHandler(doneJobs <-chan *JobInstance, runnab
 		return jobs
 	}
 
-	if len(wi.jobs) > 0 {
+	if len(wi.entry.jobs) > 0 {
 		// Resuming jobs
-		for _, job := range wi.jobs {
-			if job.status() == "Started" {
-				launch(job)
+		for _, jobEntry := range wi.entry.jobs {
+			if jobEntry.LatestStatusEntry().status == "Started" {
+				ji := wi.jobInstanceFromJobEntry(jobEntry)
+				launch(ji)
 			}
 		}
 	} else {
@@ -225,7 +225,7 @@ func (wi *WorkflowInstance) doneJobsHandler(doneJobs <-chan *JobInstance, runnab
 	}
 }
 
-func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Context, abortCtx context.Context) {
+func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Context, abortCtx context.Context, wg *sync.WaitGroup) {
 	var log = wi.log.ForWorkflow(wi.Uuid())
 	backend := NewLocalBackend()
 
@@ -244,10 +244,13 @@ func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Conte
 
 	defer func() {
 		log.Info("workflow: exiting with state: %s", wi.Status())
-		wi.done <- wi
-		close(wi.done)
-		close(doneJobs)
-		done <- wi
+		close(doneJobs) // This will cause the doneJobsHandler() goroutine to exit
+		if !wi.shuttingDown {
+			wi.done <- wi
+			close(wi.done)
+			done <- wi
+		}
+		wg.Done()
 	}()
 
 	go wi.doneJobsHandler(doneJobs, runnableJobs, workflowDone)
@@ -266,9 +269,9 @@ func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Conte
 			select {
 			case job := <-runnableJobs:
 				log.Info("workflow: launching call: %s", job.node().String())
-				ctx, cancel := context.WithCancel(context.Background())
-				job.cancel = cancel
-				go job.run(backend, exec.Command("sleep", "2"), jobDone, ctx)
+				jobCtx, jobCancel := context.WithCancel(ctx)
+				job.cancel = jobCancel
+				go job.run(backend, exec.Command("sleep", "2"), jobDone, jobCtx)
 			case <-workflowDone:
 				return
 			case job := <-jobDone:
@@ -278,10 +281,8 @@ func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Conte
 				log.Info("workflow: shutdown...")
 				wi.jobsMutex.Lock()
 				wi.shuttingDown = true
-				for _, job := range wi.jobs {
-					job.cancel()
-				}
 				wi.jobsMutex.Unlock()
+				return
 			case <-abortCtx.Done():
 				log.Info("workflow: abort...")
 				wi.jobsMutex.Lock()
@@ -311,6 +312,7 @@ type Kernel struct {
 }
 
 func (kernel *Kernel) run(ctx context.Context) {
+	var workflowWaitGroup sync.WaitGroup
 	var workers = 0
 	var workflowDone = make(chan *WorkflowInstance)
 	var log = kernel.log
@@ -320,17 +322,16 @@ func (kernel *Kernel) run(ctx context.Context) {
 		kernel.mutex.Lock()
 		kernel.on = false
 		kernel.mutex.Unlock()
-		for wi, _ := range kernel.running {
-			wi.cancel()
-		}
-
-		// TODO: add a waitGroup to wait for all workflow goroutines to exit
+		workflowWaitGroup.Wait()
 		kernel.waitGroup.Done()
 		log.Info("kernel: exit")
 	}()
 
 	go func() {
-		resumableEntries, _ := kernel.db.LoadWorkflowsByStatus(log, "Started")
+		resumableEntries, err := kernel.db.LoadWorkflowsByStatus(log, "Started")
+		if err != nil {
+			panic(err) // TODO don't panic
+		}
 		for _, entry := range resumableEntries {
 			log.Info("kernel: resume workflow %s", entry.uuid)
 			wi := kernel.newWorkflowInstanceFromEntry(entry)
@@ -345,6 +346,7 @@ func (kernel *Kernel) run(ctx context.Context) {
 	}
 
 	for {
+		// TODO: need mutex around kernel.on
 		if kernel.on == false {
 			if len(kernel.running) == 0 {
 				return
@@ -359,17 +361,18 @@ func (kernel *Kernel) run(ctx context.Context) {
 				if ok {
 					workers++
 					kernel.running[wi] = struct{}{}
-					wiCtx, workflowCancel := context.WithTimeout(ctx, kernel.workflowMaxRuntime)
-					wiAbortCtx, workflowAbort := context.WithTimeout(ctx, kernel.workflowMaxRuntime)
+					wiCtx, workflowCancel := context.WithCancel(ctx)
+					wiAbortCtx, workflowAbort := context.WithTimeout(context.Background(), kernel.workflowMaxRuntime)
 					wi.cancel = workflowCancel
 					wi.abort = workflowAbort
 					log.Info("kernel: starting %s", wi.Uuid())
-					go wi.run(workflowDone, wiCtx, wiAbortCtx)
+					workflowWaitGroup.Add(1)
+					go wi.run(workflowDone, wiCtx, wiAbortCtx, &workflowWaitGroup)
 				}
 			case abortWi := <-kernel.abortChannel:
 				for wi, _ := range kernel.running {
 					if wi.Uuid() == abortWi.Uuid() {
-						wi.cancel()
+						wi.abort()
 					}
 				}
 			case wi := <-workflowDone:
@@ -396,6 +399,7 @@ func (kernel Kernel) signalHandler() {
 		sig := <-sigs
 		kernel.log.Info("%s signal detected... turning off kernel", sig)
 		kernel.cancel()
+		kernel.waitGroup.Wait()
 		kernel.log.Info("%s signal detected... kernel off", sig)
 		os.Exit(130)
 	}(kernel)

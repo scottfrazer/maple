@@ -36,6 +36,9 @@ func (we *WorkflowEntry) LatestStatusEntry() *WorkflowStatusEntry {
 		if latest == nil || entry.date.After(latest.date) {
 			latest = entry
 		}
+		if entry.date.Equal(latest.date) && latest.primaryKey < entry.primaryKey {
+			latest = entry
+		}
 	}
 	return latest
 }
@@ -65,6 +68,9 @@ func (je *JobEntry) LatestStatusEntry() *JobStatusEntry {
 	var latest *JobStatusEntry = nil
 	for _, entry := range je.statusEntries {
 		if latest == nil || entry.date.After(latest.date) {
+			latest = entry
+		}
+		if entry.date.Equal(latest.date) && latest.primaryKey < entry.primaryKey {
 			latest = entry
 		}
 	}
@@ -485,8 +491,46 @@ func (dsp *MapleDb) loadJobStatusEntries(jobPrimaryKey int64, log *Logger) ([]*J
 	var entries []*JobStatusEntry
 	for rows.Next() {
 		var entry JobStatusEntry
+		var date string
 
-		err = rows.Scan(&entry.primaryKey, &entry.status, &entry.date)
+		err = rows.Scan(&entry.primaryKey, &entry.status, &date)
+
+		if err != nil {
+			return nil, err
+		}
+
+		entry.date, err = time.Parse("2006-01-02 15:04:05.999", date)
+
+		if err != nil {
+			return nil, err
+		}
+
+		entries = append(entries, &entry)
+	}
+	return entries, nil
+}
+
+func (dsp *MapleDb) loadWorkflowStatusEntries(workflowPrimaryKey int64, log *Logger) ([]*WorkflowStatusEntry, error) {
+	var query = `SELECT id, status, date FROM workflow_status WHERE workflow_id=?`
+	log.DbQuery(query, strconv.FormatInt(workflowPrimaryKey, 10))
+	rows, err := dsp.db.Query(query, workflowPrimaryKey)
+	if err != nil {
+		return nil, err
+	}
+
+	var entries []*WorkflowStatusEntry
+	for rows.Next() {
+		var entry WorkflowStatusEntry
+		var date string
+
+		err = rows.Scan(&entry.primaryKey, &entry.status, &date)
+
+		if err != nil {
+			return nil, err
+		}
+
+		entry.date, err = time.Parse("2006-01-02 15:04:05.999", date)
+
 		if err != nil {
 			return nil, err
 		}
@@ -513,6 +557,12 @@ func (dsp *MapleDb) loadWorkflowEntry(log *Logger, primaryKey int64) (*WorkflowE
 		return nil, err
 	}
 	entry.sources = sources
+
+	statusEntries, err := dsp.loadWorkflowStatusEntries(primaryKey, log)
+	if err != nil {
+		return nil, err
+	}
+	entry.statusEntries = statusEntries
 
 	jobs, err := dsp.loadJobEntries(log, primaryKey)
 	if err != nil {
