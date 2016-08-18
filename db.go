@@ -233,6 +233,8 @@ func (dsp *MapleDb) NewJobEntry(workflowPrimaryKey int64, fqn string, shard, att
 		return nil, err
 	}
 
+	success = true
+
 	var entry JobEntry
 	entry.primaryKey = primaryKey
 	entry.fqn = fqn
@@ -332,6 +334,8 @@ func (dsp *MapleDb) NewWorkflowEntry(uuid uuid.UUID, wdl, inputs, options string
 	if err != nil {
 		return nil, err
 	}
+
+	success = true
 
 	var entry WorkflowEntry
 	entry.primaryKey = primaryKey

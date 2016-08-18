@@ -111,7 +111,6 @@ func (wi *WorkflowInstance) Graph() *Graph {
 	return wi._graph
 }
 
-// TODO: this algorithm could use some work
 func (wi *WorkflowInstance) isTerminal() *string {
 	wi.jobsMutex.Lock()
 	defer wi.jobsMutex.Unlock()
@@ -174,7 +173,6 @@ func (wi *WorkflowInstance) doneJobsHandler(doneJobs <-chan *JobInstance, runnab
 	}
 
 	var persist = func(nodes []*Node) []*JobInstance {
-		wi.log.Info("!!! persist() %v", nodes)
 		jobs := make([]*JobInstance, len(nodes))
 		for index, node := range nodes {
 			job, err := wi.newJob(node)
@@ -430,11 +428,10 @@ func (kernel *Kernel) newWorkflowInstanceFromEntry(entry *WorkflowEntry) *Workfl
 	var jobsMutex sync.Mutex
 
 	return &WorkflowInstance{
-		entry:     entry,
-		done:      make(chan *WorkflowInstance, 1),
-		jobs:      nil,
-		jobsMutex: &jobsMutex,
-		// TODO: can we populate these for real at this point?
+		entry:        entry,
+		done:         make(chan *WorkflowInstance, 1),
+		jobs:         nil,
+		jobsMutex:    &jobsMutex,
 		cancel:       func() {},
 		abort:        func() {},
 		shuttingDown: false,
