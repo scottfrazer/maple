@@ -39,7 +39,7 @@ func SubmitHttpEndpoint(kernel *Kernel) http.HandlerFunc {
 		}
 
 		uuid := uuid.NewV4()
-		ctx, err := kernel.Submit(wdl, inputs, options, uuid, time.Millisecond*500)
+		workflow, err := kernel.Submit(wdl, inputs, options, uuid, time.Millisecond*500)
 		if err != nil {
 			if err.Error() == "Timeout submitting workflow" {
 				w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -54,7 +54,7 @@ func SubmitHttpEndpoint(kernel *Kernel) http.HandlerFunc {
 		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
-		io.WriteString(w, fmt.Sprintf("%s", ctx.uuid))
+		io.WriteString(w, fmt.Sprintf("%s", workflow.Uuid()))
 	}
 }
 
@@ -93,7 +93,7 @@ func AbortHttpEndpoint(kernel *Kernel) http.HandlerFunc {
 
 func ListHttpEndpoint(kernel *Kernel) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		wfs, err := kernel.List()
+		entries, err := kernel.List()
 
 		if err != nil {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -102,14 +102,14 @@ func ListHttpEndpoint(kernel *Kernel) http.HandlerFunc {
 			return
 		}
 
-		if len(wfs) == 0 {
+		if len(entries) == 0 {
 			io.WriteString(w, "[]")
 			return
 		}
 
 		var strs []string
-		for _, wf := range wfs {
-			strs = append(strs, fmt.Sprintf(`{"Uuid": "%s", "Status": "%s"}`, wf.Uuid(), wf.Status()))
+		for _, entry := range entries {
+			strs = append(strs, fmt.Sprintf(`{"Uuid": "%s", "Status": "%s"}`, entry.uuid, entry.LatestStatusEntry()))
 		}
 		io.WriteString(w, fmt.Sprintf("[\n  %s\n]", strings.Join(strs, ",\n  ")))
 	}

@@ -21,37 +21,35 @@ type WorkflowSources struct {
 	_graph  *Graph
 }
 
-func (sources *WorkflowSources) graph() *Graph {
-	if sources._graph != nil {
-		return sources._graph
-	}
-
-	reader := strings.NewReader(sources.wdl)
-	sources._graph = LoadGraph(reader)
-	return sources._graph
-}
-
 type JobInstance struct {
-	primaryKey int64
-	node       *Node
-	shard      int
-	attempt    int
-	status     string
-	cancel     func()
-	abort      func()
-	wi         *WorkflowInstance
-	db         *MapleDb
-	log        *Logger
+	entry  *JobEntry
+	cancel func()
+	abort  func()
+	wi     *WorkflowInstance
+	db     *MapleDb
+	log    *Logger
 }
 
-func (ji *JobInstance) setStatus(status string) {
-	if status == ji.status {
+func (ji *JobInstance) status() string {
+	return ji.entry.LatestStatusEntry().status
+}
+
+func (ji *JobInstance) node() *Node {
+	return ji.wi.Graph().Find(ji.entry.fqn)
+}
+
+func (ji *JobInstance) setStatus(status string) error {
+	if status == ji.status() {
 		ji.log.Info("warning: already has status %s", status)
-		return
+		return nil
 	}
-	ji.db.SetJobStatus(ji.primaryKey, status, ji.log)
-	ji.log.Info("status change %s -> %s", ji.status, status)
-	ji.status = status
+	ji.log.Info("status change %s -> %s", ji.status(), status)
+	statusEntry, err := ji.db.NewJobStatusEntry(ji.entry.primaryKey, status, time.Now(), ji.log)
+	if err != nil {
+		return err
+	}
+	ji.entry.statusEntries = append(ji.entry.statusEntries, statusEntry)
+	return nil
 }
 
 func (ji *JobInstance) run(backend Backend, cmd *exec.Cmd, done chan<- *JobInstance, ctx context.Context) {
@@ -83,11 +81,8 @@ func (ji *JobInstance) run(backend Backend, cmd *exec.Cmd, done chan<- *JobInsta
 }
 
 type WorkflowInstance struct {
-	uuid         uuid.UUID
-	primaryKey   int64
+	entry        *WorkflowEntry
 	done         chan *WorkflowInstance
-	source       *WorkflowSources
-	status       string
 	jobs         []*JobInstance
 	jobsMutex    *sync.Mutex
 	cancel       func()
@@ -96,14 +91,24 @@ type WorkflowInstance struct {
 	aborting     bool
 	db           *MapleDb
 	log          *Logger
+	start        time.Time // TODO: eventually move this to the entry (and DB)
+	_graph       *Graph
 }
 
 func (wi *WorkflowInstance) Uuid() uuid.UUID {
-	return wi.uuid
+	return wi.entry.uuid
 }
 
 func (wi *WorkflowInstance) Status() string {
-	return wi.status
+	return wi.entry.LatestStatusEntry().status
+}
+
+func (wi *WorkflowInstance) Graph() *Graph {
+	if wi._graph == nil {
+		reader := strings.NewReader(wi.entry.sources.wdl)
+		wi._graph = LoadGraph(reader)
+	}
+	return wi._graph
 }
 
 // TODO: this algorithm could use some work
@@ -114,42 +119,44 @@ func (wi *WorkflowInstance) isTerminal() *string {
 	status := "Done"
 
 	for _, job := range wi.jobs {
-		if job.status != "Done" {
+		if job.status() != "Done" {
 			status = "Failed"
 		}
-		if job.status == "Started" || job.status == "NotStarted" {
+		if job.status() == "Started" || job.status() == "NotStarted" {
 			return nil
 		}
 	}
 	return &status
 }
 
-func (wi *WorkflowInstance) setStatus(status string) {
-	if status == wi.status {
+func (wi *WorkflowInstance) setStatus(status string) error {
+	if status == wi.Status() {
 		wi.log.Info("warning: already has status %s", status)
-		return
+		return nil
 	}
-	wi.log.Info("status change %s -> %s", wi.status, status)
-	wi.db.SetWorkflowStatus(wi.primaryKey, status, wi.log)
-	wi.status = status
+	wi.log.Info("status change %s -> %s", wi.Status(), status)
+	statusEntry, err := wi.db.NewWorkflowStatusEntry(wi.entry.primaryKey, status, time.Now(), wi.log)
+	if err != nil {
+		return err
+	}
+	wi.entry.statusEntries = append(wi.entry.statusEntries, statusEntry)
+	return nil
 }
 
 func (wi *WorkflowInstance) newJob(node *Node) (*JobInstance, error) {
-	job := JobInstance{
-		primaryKey: -1,
-		node:       node,
-		shard:      0,
-		attempt:    1,
-		status:     "NotStarted",
-		cancel:     func() {},
-		abort:      func() {},
-		wi:         wi,
-		db:         wi.db,
-		log:        wi.log.ForJob(wi.uuid, node.name)}
-	err := wi.db.NewJob(&job, wi.log)
+	entry, err := wi.db.NewJobEntry(wi.entry.primaryKey, node.name, 0, 1, wi.log)
 	if err != nil {
 		return nil, err
 	}
+
+	job := JobInstance{
+		entry:  entry,
+		cancel: func() {},
+		abort:  func() {},
+		wi:     wi,
+		db:     wi.db,
+		log:    wi.log.ForJob(wi.Uuid(), node.name)}
+
 	return &job, nil
 }
 
@@ -160,8 +167,6 @@ func (wi *WorkflowInstance) isAcceptingJobs() bool {
 }
 
 func (wi *WorkflowInstance) doneJobsHandler(doneJobs <-chan *JobInstance, runnableJobs chan<- *JobInstance, workflowDone chan<- string) {
-	graph := wi.source.graph()
-
 	var launch = func(job *JobInstance) {
 		if wi.isAcceptingJobs() {
 			runnableJobs <- job
@@ -169,6 +174,7 @@ func (wi *WorkflowInstance) doneJobsHandler(doneJobs <-chan *JobInstance, runnab
 	}
 
 	var persist = func(nodes []*Node) []*JobInstance {
+		wi.log.Info("!!! persist() %v", nodes)
 		jobs := make([]*JobInstance, len(nodes))
 		for index, node := range nodes {
 			job, err := wi.newJob(node)
@@ -187,13 +193,13 @@ func (wi *WorkflowInstance) doneJobsHandler(doneJobs <-chan *JobInstance, runnab
 	if len(wi.jobs) > 0 {
 		// Resuming jobs
 		for _, job := range wi.jobs {
-			if job.status == "Started" {
+			if job.status() == "Started" {
 				launch(job)
 			}
 		}
 	} else {
 		// Launching the root jobs
-		newJobs := persist(graph.Root())
+		newJobs := persist(wi.Graph().Root())
 		for _, job := range newJobs {
 			launch(job)
 		}
@@ -201,7 +207,7 @@ func (wi *WorkflowInstance) doneJobsHandler(doneJobs <-chan *JobInstance, runnab
 
 	for doneJob := range doneJobs {
 		// Persist all new downstream nodes to the database first
-		jobs := persist(graph.Downstream(doneJob.node))
+		jobs := persist(wi.Graph().Downstream(doneJob.node()))
 
 		// If at this stage every job is in a terminal state, the workflow is done.
 		terminalStatus := wi.isTerminal()
@@ -222,11 +228,14 @@ func (wi *WorkflowInstance) doneJobsHandler(doneJobs <-chan *JobInstance, runnab
 }
 
 func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Context, abortCtx context.Context) {
-	var log = wi.log.ForWorkflow(wi.uuid)
+	var log = wi.log.ForWorkflow(wi.Uuid())
 	backend := NewLocalBackend()
 
+	wi.start = time.Now()
 	log.Info("run: enter")
-	defer log.Info("run: exit")
+	defer func() {
+		log.Info("run: exit (runtime %s)", time.Since(wi.start))
+	}()
 
 	wi.setStatus("Started")
 
@@ -236,7 +245,7 @@ func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Conte
 	var doneJobs = make(chan *JobInstance)
 
 	defer func() {
-		log.Info("workflow: exiting with state: %s", wi.status)
+		log.Info("workflow: exiting with state: %s", wi.Status())
 		wi.done <- wi
 		close(wi.done)
 		close(doneJobs)
@@ -252,20 +261,20 @@ func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Conte
 			case <-workflowDone:
 				return
 			case job := <-jobDone:
-				log.Info("workflow: job finished: %s", job.status)
+				log.Info("workflow: job finished: %s", job.status())
 				doneJobs <- job
 			}
 		} else {
 			select {
 			case job := <-runnableJobs:
-				log.Info("workflow: launching call: %s", job.node.String())
+				log.Info("workflow: launching call: %s", job.node().String())
 				ctx, cancel := context.WithCancel(context.Background())
 				job.cancel = cancel
 				go job.run(backend, exec.Command("sleep", "2"), jobDone, ctx)
 			case <-workflowDone:
 				return
 			case job := <-jobDone:
-				log.Info("workflow: job finished: %s", job.status)
+				log.Info("workflow: job finished: %s", job.status())
 				doneJobs <- job
 			case <-ctx.Done():
 				log.Info("workflow: shutdown...")
@@ -323,16 +332,16 @@ func (kernel *Kernel) run(ctx context.Context) {
 	}()
 
 	go func() {
-		// TODO: returns PKs?  then loadWorkflow(workflowPk)
-		restartable, _ := kernel.db.GetWorkflowsByStatus(log, "Started")
-		for _, wi := range restartable {
-			log.Info("kernel: resume workflow %s", wi.uuid)
+		resumableEntries, _ := kernel.db.LoadWorkflowsByStatus(log, "Started")
+		for _, entry := range resumableEntries {
+			log.Info("kernel: resume workflow %s", entry.uuid)
+			wi := kernel.newWorkflowInstanceFromEntry(entry)
 			kernel.enqueue(wi, time.Minute)
 		}
 	}()
 
 	var processDone = func(result *WorkflowInstance) {
-		log.Info("kernel: workflow %s finished: %s", result.uuid, result.status)
+		log.Info("kernel: workflow %s finished: %s", result.Uuid(), result.Status())
 		delete(kernel.running, result)
 		workers--
 	}
@@ -356,13 +365,13 @@ func (kernel *Kernel) run(ctx context.Context) {
 					wiAbortCtx, workflowAbort := context.WithTimeout(ctx, kernel.workflowMaxRuntime)
 					wi.cancel = workflowCancel
 					wi.abort = workflowAbort
-					log.Info("kernel: starting %s", wi.uuid)
+					log.Info("kernel: starting %s", wi.Uuid())
 					go wi.run(workflowDone, wiCtx, wiAbortCtx)
 				}
-			case abortUuid := <-kernel.abortChannel:
-				for context, _ := range kernel.running {
-					if context.uuid == abortUuid.uuid {
-						context.cancel()
+			case abortWi := <-kernel.abortChannel:
+				for wi, _ := range kernel.running {
+					if wi.Uuid() == abortWi.Uuid() {
+						wi.cancel()
 					}
 				}
 			case wi := <-workflowDone:
@@ -409,30 +418,30 @@ func (kernel *Kernel) enqueue(ctx *WorkflowInstance, timeout time.Duration) erro
 	return nil
 }
 
-func (kernel *Kernel) newWorkflow(uuid uuid.UUID, source *WorkflowSources) (*WorkflowInstance, error) {
+func (kernel *Kernel) newWorkflowInstance(uuid uuid.UUID, source *WorkflowSources) (*WorkflowInstance, error) {
+	entry, err := kernel.db.NewWorkflowEntry(uuid, source.wdl, source.inputs, source.options, kernel.log)
+	if err != nil {
+		return nil, err
+	}
+	return kernel.newWorkflowInstanceFromEntry(entry), nil
+}
+
+func (kernel *Kernel) newWorkflowInstanceFromEntry(entry *WorkflowEntry) *WorkflowInstance {
 	var jobsMutex sync.Mutex
 
-	wi := &WorkflowInstance{
-		uuid:         uuid,
-		primaryKey:   -1,
-		done:         make(chan *WorkflowInstance, 1),
-		source:       source,
-		status:       "NotStarted",
-		jobs:         nil,
-		jobsMutex:    &jobsMutex,
+	return &WorkflowInstance{
+		entry:     entry,
+		done:      make(chan *WorkflowInstance, 1),
+		jobs:      nil,
+		jobsMutex: &jobsMutex,
+		// TODO: can we populate these for real at this point?
 		cancel:       func() {},
 		abort:        func() {},
 		shuttingDown: false,
 		aborting:     false,
 		db:           kernel.db,
-		log:          kernel.log.ForWorkflow(uuid)}
-
-	err := kernel.db.NewWorkflow(wi, kernel.log)
-	if err != nil {
-		return nil, err
-	}
-
-	return wi, nil
+		log:          kernel.log.ForWorkflow(entry.uuid),
+		_graph:       nil}
 }
 
 func NewKernel(log *Logger, dbName string, dbConnection string, concurrentWorkflows int, submitQueueSize int) *Kernel {
@@ -491,7 +500,7 @@ func (kernel *Kernel) Run(wdl, inputs, options string, id uuid.UUID) (*WorkflowI
 
 func (kernel *Kernel) Submit(wdl, inputs, options string, id uuid.UUID, timeout time.Duration) (*WorkflowInstance, error) {
 	sources := WorkflowSources{strings.TrimSpace(wdl), strings.TrimSpace(inputs), strings.TrimSpace(options), nil}
-	wi, err := kernel.newWorkflow(id, &sources)
+	wi, err := kernel.newWorkflowInstance(id, &sources)
 	if err != nil {
 		return nil, err
 	}
@@ -500,20 +509,20 @@ func (kernel *Kernel) Submit(wdl, inputs, options string, id uuid.UUID, timeout 
 }
 
 func (kernel *Kernel) Abort(id uuid.UUID, timeout time.Duration) error {
-	for context, _ := range kernel.running {
-		if context.uuid == id {
+	for wi, _ := range kernel.running {
+		if wi.Uuid() == id {
 			timer := time.After(timeout)
 
 			select {
-			case kernel.abortChannel <- context:
+			case kernel.abortChannel <- wi:
 			case <-timer:
-				return errors.New(fmt.Sprintf("Timeout submitting workflow %s to be aborted", context.uuid))
+				return errors.New(fmt.Sprintf("Timeout submitting workflow %s to be aborted", wi.Uuid()))
 			}
 
 			select {
-			case <-context.done:
+			case <-wi.done:
 			case <-timer:
-				return errors.New(fmt.Sprintf("Timeout aborting workflow %s", context.uuid))
+				return errors.New(fmt.Sprintf("Timeout aborting workflow %s", wi.Uuid()))
 			}
 		}
 	}
@@ -524,8 +533,8 @@ func (kernel *Kernel) AbortCall(id uuid.UUID, timeout time.Duration) error {
 	return nil
 }
 
-func (kernel *Kernel) List() ([]*WorkflowInstance, error) {
-	return kernel.db.GetWorkflowsByStatus(kernel.log, "Started", "NotStarted", "Done", "Aborted")
+func (kernel *Kernel) List() ([]*WorkflowEntry, error) {
+	return kernel.db.LoadWorkflowsByStatus(kernel.log, "Started", "NotStarted", "Done", "Aborted")
 }
 
 func (kernel *Kernel) Uptime() time.Duration {
