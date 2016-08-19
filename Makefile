@@ -5,3 +5,5 @@ clean:
 install:
 	go install -ldflags $(LD_FLAGS) github.com/scottfrazer/maple
 	go install -ldflags $(LD_FLAGS) github.com/scottfrazer/maple/cmd/maple
+test:
+	go test -v github.com/scottfrazer/maple

@@ -19,7 +19,7 @@ func (handle *LocalJobHandle) String() string {
 	return strconv.FormatInt(int64(handle.id), 10)
 }
 
-type LocalBackendJob struct {
+type TestBackendJob struct {
 	ctx      context.Context
 	abortCtx context.Context
 	ticker   <-chan time.Time
@@ -29,27 +29,27 @@ type Backend interface {
 	Submit(done chan<- bool, ctx context.Context, abortCtx context.Context) JobHandle
 }
 
-type LocalBackend struct {
+type TestBackend struct {
 	counter   int
-	jobs      map[int]*LocalBackendJob
+	jobs      map[int]*TestBackendJob
 	jobsMutex *sync.Mutex
 }
 
-func NewLocalBackend() Backend {
+func NewTestBackend() Backend {
 	var mutex sync.Mutex
-	be := LocalBackend{0, make(map[int]*LocalBackendJob), &mutex}
+	be := TestBackend{0, make(map[int]*TestBackendJob), &mutex}
 	return be
 }
 
-func (be LocalBackend) Submit(done chan<- bool, ctx context.Context, abortCtx context.Context) JobHandle {
+func (be TestBackend) Submit(done chan<- bool, ctx context.Context, abortCtx context.Context) JobHandle {
 	be.jobsMutex.Lock()
 	defer be.jobsMutex.Unlock()
-	job := LocalBackendJob{ctx, abortCtx, time.After(time.Second * 10)}
+	job := TestBackendJob{ctx, abortCtx, time.After(time.Second * 2)}
 	handle := &LocalJobHandle{be.counter}
 	be.jobs[be.counter] = &job
 	be.counter += 1
 
-	go func(job *LocalBackendJob) {
+	go func(job *TestBackendJob) {
 		select {
 		case <-job.ticker:
 		case <-job.ctx.Done():
@@ -74,10 +74,10 @@ func Abort(handle *JobHandle) {
 	}*/
 }
 
-func (be *LocalBackend) Wait(handle JobHandle) {
+func (be *TestBackend) Wait(handle JobHandle) {
 
 }
 
-func (be *LocalBackend) Recover(handle JobHandle) {
+func (be *TestBackend) Recover(handle JobHandle) {
 
 }

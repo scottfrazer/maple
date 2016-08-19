@@ -248,7 +248,7 @@ func (wi *WorkflowInstance) doneJobsHandler(doneJobs <-chan *JobInstance, runnab
 
 func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Context, abortCtx context.Context, wg *sync.WaitGroup) {
 	var log = wi.log.ForWorkflow(wi.Uuid())
-	backend := NewLocalBackend()
+	backend := NewTestBackend()
 
 	wi.start = time.Now()
 	log.Info("run: enter")
@@ -298,7 +298,6 @@ func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Conte
 			case ji := <-jobDone:
 				processDone(ji)
 			case <-workflowDone:
-				log.Info("workflow: done channel received (2)")
 				return
 			}
 		} else {
@@ -314,7 +313,6 @@ func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Conte
 				go ji.run(backend, exec.Command("sleep", "2"), jobDone, jiCtx, jiAbortCtx)
 				wi.jobsMutex.Unlock()
 			case <-workflowDone:
-				log.Info("workflow: done channel received (1)")
 				return
 			case ji := <-jobDone:
 				processDone(ji)
