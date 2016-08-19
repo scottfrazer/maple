@@ -52,16 +52,21 @@ func (ji *JobInstance) setStatus(status string) error {
 	return nil
 }
 
-func (ji *JobInstance) run(backend Backend, cmd *exec.Cmd, done chan<- *JobInstance, ctx context.Context) {
+func (ji *JobInstance) getStatus() string {
+	return ji.entry.LatestStatusEntry().status
+}
+
+func (ji *JobInstance) run(backend Backend, cmd *exec.Cmd, done chan<- *JobInstance, ctx context.Context, abortCtx context.Context) {
 	var backendJobDone = make(chan bool, 1)
 	log := ji.log
 	log.Info("run: enter")
 	defer log.Info("run: exit")
-	backendJobCtx, _ := context.WithCancel(ctx)
+	backendJobCtx, backendJobCancel := context.WithCancel(ctx)
+	backendJobAbortCtx, backendJobAbort := context.WithCancel(context.Background())
 
 	ji.setStatus("Started")
 
-	backend.Submit(backendJobDone, backendJobCtx)
+	backend.Submit(backendJobDone, backendJobCtx, backendJobAbortCtx)
 
 	for {
 		select {
@@ -71,7 +76,16 @@ func (ji *JobInstance) run(backend Backend, cmd *exec.Cmd, done chan<- *JobInsta
 			return
 		case <-ctx.Done():
 			log.Info("run: shutdown...")
+			backendJobCancel()
 			<-backendJobDone
+			done <- ji
+			return
+		case <-abortCtx.Done():
+			log.Info("run: abort...")
+			backendJobAbort()
+			<-backendJobDone
+			ji.setStatus("Aborted")
+			done <- ji
 			return
 		}
 	}
@@ -80,7 +94,7 @@ func (ji *JobInstance) run(backend Backend, cmd *exec.Cmd, done chan<- *JobInsta
 type WorkflowInstance struct {
 	entry        *WorkflowEntry
 	done         chan *WorkflowInstance
-	jobs         []*JobInstance
+	running      map[*JobInstance]struct{}
 	jobsMutex    *sync.Mutex
 	cancel       func()
 	abort        func()
@@ -112,13 +126,16 @@ func (wi *WorkflowInstance) isTerminal() *string {
 	wi.jobsMutex.Lock()
 	defer wi.jobsMutex.Unlock()
 
+	// A job is terminal if everything that could be run has been run
 	status := "Done"
 
-	for _, job := range wi.jobs {
-		if job.status() != "Done" {
+	for _, jobEntry := range wi.entry.jobs {
+		// TODO: JobEntry.Status() ???
+		jobStatus := jobEntry.LatestStatusEntry().status
+		if jobStatus == "Failed" {
 			status = "Failed"
 		}
-		if job.status() == "Started" || job.status() == "NotStarted" {
+		if jobStatus == "Started" || jobStatus == "NotStarted" || jobStatus == "Aborted" {
 			return nil
 		}
 	}
@@ -179,10 +196,8 @@ func (wi *WorkflowInstance) doneJobsHandler(doneJobs <-chan *JobInstance, runnab
 				// TODO: don't panic, should fail workflow
 				panic(err)
 			}
-			wi.jobsMutex.Lock()
+			wi.entry.jobs = append(wi.entry.jobs, job.entry)
 			jobs[index] = job
-			wi.jobs = append(wi.jobs, job)
-			wi.jobsMutex.Unlock()
 		}
 		return jobs
 	}
@@ -204,8 +219,14 @@ func (wi *WorkflowInstance) doneJobsHandler(doneJobs <-chan *JobInstance, runnab
 	}
 
 	for doneJob := range doneJobs {
+		var jobs []*JobInstance
+
+		if doneJob.getStatus() != "Done" {
+			continue
+		}
+
 		// Persist all new downstream nodes to the database first
-		jobs := persist(wi.Graph().Downstream(doneJob.node()))
+		jobs = persist(wi.Graph().Downstream(doneJob.node()))
 
 		// If at this stage every job is in a terminal state, the workflow is done.
 		terminalStatus := wi.isTerminal()
@@ -243,8 +264,13 @@ func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Conte
 	var doneJobs = make(chan *JobInstance)
 
 	defer func() {
-		log.Info("workflow: exiting with state: %s", wi.Status())
 		close(doneJobs) // This will cause the doneJobsHandler() goroutine to exit
+
+		if wi.aborting {
+			wi.setStatus("Aborted")
+		}
+		log.Info("workflow: exiting with state: %s", wi.Status())
+
 		if !wi.shuttingDown {
 			wi.done <- wi
 			close(wi.done)
@@ -253,44 +279,61 @@ func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Conte
 		wg.Done()
 	}()
 
+	var processDone = func(ji *JobInstance) {
+		log.Info("workflow: job finished: %s", ji.status())
+		doneJobs <- ji
+		delete(wi.running, ji)
+	}
+
 	go wi.doneJobsHandler(doneJobs, runnableJobs, workflowDone)
 
 	for {
 		if wi.isAcceptingJobs() == false {
+			if wi.aborting && len(wi.running) == 0 {
+				return
+			}
+
 			select {
 			case <-runnableJobs:
+			case ji := <-jobDone:
+				processDone(ji)
 			case <-workflowDone:
+				log.Info("workflow: done channel received (2)")
 				return
-			case job := <-jobDone:
-				log.Info("workflow: job finished: %s", job.status())
-				doneJobs <- job
 			}
 		} else {
 			select {
-			case job := <-runnableJobs:
-				log.Info("workflow: launching call: %s", job.node().String())
-				jobCtx, jobCancel := context.WithCancel(ctx)
-				job.cancel = jobCancel
-				go job.run(backend, exec.Command("sleep", "2"), jobDone, jobCtx)
-			case <-workflowDone:
-				return
-			case job := <-jobDone:
-				log.Info("workflow: job finished: %s", job.status())
-				doneJobs <- job
-			case <-ctx.Done():
-				log.Info("workflow: shutdown...")
+			case ji := <-runnableJobs:
 				wi.jobsMutex.Lock()
+				log.Info("workflow: launching call: %s", ji.node().String())
+				wi.running[ji] = struct{}{}
+				jiCtx, jiCancel := context.WithCancel(ctx)
+				ji.cancel = jiCancel
+				jiAbortCtx, jiAbort := context.WithCancel(context.Background())
+				ji.abort = jiAbort
+				go ji.run(backend, exec.Command("sleep", "2"), jobDone, jiCtx, jiAbortCtx)
+				wi.jobsMutex.Unlock()
+			case <-workflowDone:
+				log.Info("workflow: done channel received (1)")
+				return
+			case ji := <-jobDone:
+				processDone(ji)
+			case <-ctx.Done():
+				wi.jobsMutex.Lock()
+				log.Info("workflow: shutdown...")
 				wi.shuttingDown = true
 				wi.jobsMutex.Unlock()
 				return
 			case <-abortCtx.Done():
-				log.Info("workflow: abort...")
 				wi.jobsMutex.Lock()
+				log.Info("workflow: abort...")
+				// TODO: is wi.aborting needed? can it be replaced with wi.getStatus() == "Aborting"
 				wi.aborting = true
-				for _, job := range wi.jobs {
-					job.abort()
+				for ji, _ := range wi.running {
+					ji.abort()
 				}
 				wi.jobsMutex.Unlock()
+				wi.setStatus("Aborting")
 			}
 		}
 	}
@@ -378,6 +421,7 @@ func (kernel *Kernel) run(ctx context.Context) {
 			case wi := <-workflowDone:
 				processDone(wi)
 			case <-ctx.Done():
+				log.Info("kernel: shutdown...")
 				return
 			}
 		} else {
@@ -385,6 +429,7 @@ func (kernel *Kernel) run(ctx context.Context) {
 			case wi := <-workflowDone:
 				processDone(wi)
 			case <-ctx.Done():
+				log.Info("kernel: shutdown...")
 				return
 			}
 		}
@@ -434,7 +479,7 @@ func (kernel *Kernel) newWorkflowInstanceFromEntry(entry *WorkflowEntry) *Workfl
 	return &WorkflowInstance{
 		entry:        entry,
 		done:         make(chan *WorkflowInstance, 1),
-		jobs:         nil,
+		running:      make(map[*JobInstance]struct{}),
 		jobsMutex:    &jobsMutex,
 		cancel:       func() {},
 		abort:        func() {},

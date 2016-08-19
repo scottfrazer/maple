@@ -444,7 +444,7 @@ func (dsp *MapleDb) LoadWorkflowsByStatus(log *Logger, status ...string) ([]*Wor
 	for i := 0; i < len(status); i++ {
 		questionMarks[i] = "?"
 	}
-	var query = `SELECT workflow_id FROM (SELECT workflow_id, status, MAX(date) FROM workflow_status GROUP BY workflow_id) WHERE status IN (` + strings.Join(questionMarks, ", ") + `);`
+	var query = `SELECT workflow_id FROM (SELECT workflow_id, status, MAX(date, id) FROM workflow_status GROUP BY workflow_id) WHERE status IN (` + strings.Join(questionMarks, ", ") + `);`
 	log.DbQuery(query, status...)
 
 	queryParams := make([]interface{}, len(status))

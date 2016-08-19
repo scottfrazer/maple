@@ -20,12 +20,13 @@ func (handle *LocalJobHandle) String() string {
 }
 
 type LocalBackendJob struct {
-	ctx    context.Context
-	ticker <-chan time.Time
+	ctx      context.Context
+	abortCtx context.Context
+	ticker   <-chan time.Time
 }
 
 type Backend interface {
-	Submit(done chan<- bool, ctx context.Context) JobHandle
+	Submit(done chan<- bool, ctx context.Context, abortCtx context.Context) JobHandle
 }
 
 type LocalBackend struct {
@@ -40,10 +41,10 @@ func NewLocalBackend() Backend {
 	return be
 }
 
-func (be LocalBackend) Submit(done chan<- bool, ctx context.Context) JobHandle {
+func (be LocalBackend) Submit(done chan<- bool, ctx context.Context, abortCtx context.Context) JobHandle {
 	be.jobsMutex.Lock()
 	defer be.jobsMutex.Unlock()
-	job := LocalBackendJob{ctx, time.After(time.Second * 5)}
+	job := LocalBackendJob{ctx, abortCtx, time.After(time.Second * 10)}
 	handle := &LocalJobHandle{be.counter}
 	be.jobs[be.counter] = &job
 	be.counter += 1
@@ -52,6 +53,7 @@ func (be LocalBackend) Submit(done chan<- bool, ctx context.Context) JobHandle {
 		select {
 		case <-job.ticker:
 		case <-job.ctx.Done():
+		case <-job.abortCtx.Done():
 		}
 
 		//cmd.Run()

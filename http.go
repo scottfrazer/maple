@@ -109,7 +109,7 @@ func ListHttpEndpoint(kernel *Kernel) http.HandlerFunc {
 
 		var strs []string
 		for _, entry := range entries {
-			strs = append(strs, fmt.Sprintf(`{"Uuid": "%s", "Status": "%s"}`, entry.uuid, entry.LatestStatusEntry()))
+			strs = append(strs, fmt.Sprintf(`{"Uuid": "%s", "Status": "%s"}`, entry.uuid, entry.LatestStatusEntry().status))
 		}
 		io.WriteString(w, fmt.Sprintf("[\n  %s\n]", strings.Join(strs, ",\n  ")))
 	}
