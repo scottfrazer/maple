@@ -39,7 +39,7 @@ func SubmitHttpEndpoint(kernel *Kernel) http.HandlerFunc {
 		}
 
 		uuid := uuid.NewV4()
-		workflow, err := kernel.Submit(wdl, inputs, options, uuid, time.Millisecond*500)
+		err = kernel.Submit(wdl, inputs, options, "testbackend", uuid, time.Millisecond*500)
 		if err != nil {
 			if err.Error() == "Timeout submitting workflow" {
 				w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -54,7 +54,7 @@ func SubmitHttpEndpoint(kernel *Kernel) http.HandlerFunc {
 		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
-		io.WriteString(w, fmt.Sprintf("%s", workflow.Uuid()))
+		io.WriteString(w, fmt.Sprintf("%s", uuid))
 	}
 }
 

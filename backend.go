@@ -26,27 +26,41 @@ type TestBackendJob struct {
 }
 
 type Backend interface {
-	Submit(done chan<- bool, ctx context.Context, abortCtx context.Context) JobHandle
+	Init() error
+	Submit(job *JobInstance, done chan<- bool, ctx context.Context, abortCtx context.Context) JobHandle
 }
 
 type TestBackend struct {
-	counter   int
-	jobs      map[int]*TestBackendJob
-	jobsMutex *sync.Mutex
+	counter           int
+	jobs              map[int]*TestBackendJob
+	jobsMutex         *sync.Mutex
+	defaultJobRuntime time.Duration
+	jobRuntime        map[string]time.Duration
 }
 
-func NewTestBackend() Backend {
+func NewTestBackend(defaultJobRuntime time.Duration, jobRuntime map[string]time.Duration) Backend {
 	var mutex sync.Mutex
-	be := TestBackend{0, make(map[int]*TestBackendJob), &mutex}
+	be := TestBackend{0, make(map[int]*TestBackendJob), &mutex, defaultJobRuntime, jobRuntime}
 	return be
 }
 
-func (be TestBackend) Submit(done chan<- bool, ctx context.Context, abortCtx context.Context) JobHandle {
+func (be TestBackend) Init() error {
+	return nil
+}
+
+func (be TestBackend) Submit(job *JobInstance, done chan<- bool, ctx context.Context, abortCtx context.Context) JobHandle {
 	be.jobsMutex.Lock()
 	defer be.jobsMutex.Unlock()
-	job := TestBackendJob{ctx, abortCtx, time.After(time.Second * 2)}
+
+	runtime := be.defaultJobRuntime
+	// TODO: job.node().name should be job.Node().Name()
+	if val, ok := be.jobRuntime[job.node().name]; ok {
+		runtime = val
+	}
+
+	backendJob := TestBackendJob{ctx, abortCtx, time.After(runtime)}
 	handle := &LocalJobHandle{be.counter}
-	be.jobs[be.counter] = &job
+	be.jobs[be.counter] = &backendJob
 	be.counter += 1
 
 	go func(job *TestBackendJob) {
@@ -62,7 +76,7 @@ func (be TestBackend) Submit(done chan<- bool, ctx context.Context, abortCtx con
 		delete(be.jobs, handle.id)
 		be.jobsMutex.Unlock()
 		done <- true
-	}(&job)
+	}(&backendJob)
 
 	return handle
 }

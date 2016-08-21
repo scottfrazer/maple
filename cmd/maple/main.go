@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/scottfrazer/maple"
 	"gopkg.in/alecthomas/kingpin.v2"
@@ -138,6 +139,7 @@ func main() {
 	case server.FullCommand():
 		logger := maple.NewLogger().ToFile(*logPath).ToWriter(os.Stdout)
 		kernel := maple.NewKernel(logger, *dbDriver, *dbConnection, *concurrentWf, *queueSize)
+		kernel.RegisterBackend("testbackend", maple.NewTestBackend(time.Second*1, make(map[string]time.Duration)))
 		kernel.On()
 
 		http.HandleFunc("/submit", maple.SubmitHttpEndpoint(kernel))

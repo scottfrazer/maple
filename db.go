@@ -25,6 +25,7 @@ type MapleDb struct {
 type WorkflowEntry struct {
 	primaryKey    int64
 	uuid          uuid.UUID
+	backend       string
 	jobs          []*JobEntry
 	statusEntries []*WorkflowStatusEntry
 	sources       *WorkflowSourcesEntry
@@ -142,7 +143,8 @@ func (dsp *MapleDb) setup() {
 	if !contains("workflow", tableNames) {
 		dsp.query(`CREATE TABLE workflow (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			uuid TEXT
+			uuid TEXT,
+			backend TEXT
 		);`)
 	}
 
@@ -287,7 +289,7 @@ func (dsp *MapleDb) newJobStatusEntry(jobPrimaryKey int64, status string, date t
 	return &entry, nil
 }
 
-func (dsp *MapleDb) NewWorkflowEntry(uuid uuid.UUID, wdl, inputs, options string, log *Logger) (*WorkflowEntry, error) {
+func (dsp *MapleDb) NewWorkflowEntry(uuid uuid.UUID, wdl, inputs, options, backend string, log *Logger) (*WorkflowEntry, error) {
 	dsp.mtx.Lock()
 	defer dsp.mtx.Unlock()
 	db := dsp.db
@@ -310,9 +312,9 @@ func (dsp *MapleDb) NewWorkflowEntry(uuid uuid.UUID, wdl, inputs, options string
 		return nil, err
 	}
 
-	query := `INSERT INTO workflow (uuid) VALUES (?)`
-	log.DbQuery(query, uuid.String())
-	res, err := tx.Exec(query, uuid)
+	query := `INSERT INTO workflow (uuid, backend) VALUES (?, ?)`
+	log.DbQuery(query, uuid.String(), backend)
+	res, err := tx.Exec(query, uuid, backend)
 	if err != nil {
 		return nil, err
 	}
@@ -346,6 +348,7 @@ func (dsp *MapleDb) NewWorkflowEntry(uuid uuid.UUID, wdl, inputs, options string
 	var entry WorkflowEntry
 	entry.primaryKey = primaryKey
 	entry.uuid = uuid
+	entry.backend = backend
 	entry.statusEntries = make([]*WorkflowStatusEntry, 1)
 	entry.statusEntries[0] = statusEntry
 	entry.sources = sources
@@ -544,10 +547,10 @@ func (dsp *MapleDb) loadWorkflowEntry(log *Logger, primaryKey int64) (*WorkflowE
 	var entry WorkflowEntry
 	entry.primaryKey = primaryKey
 
-	query := `SELECT uuid FROM workflow WHERE id=?`
+	query := `SELECT uuid, backend FROM workflow WHERE id=?`
 	log.DbQuery(query, strconv.FormatInt(primaryKey, 10))
 	row := dsp.db.QueryRow(query, primaryKey)
-	err := row.Scan(&entry.uuid)
+	err := row.Scan(&entry.uuid, &entry.backend)
 	if err != nil {
 		return nil, err
 	}
