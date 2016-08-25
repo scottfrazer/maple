@@ -483,6 +483,33 @@ func (dsp *MapleDb) LoadWorkflowsByStatus(log *Logger, status ...string) ([]*Wor
 	return entries, nil
 }
 
+func (dsp *MapleDb) LoadJobEntry(log *Logger, fqn string, shard, attempt int) (*JobEntry, error) {
+	dsp.mtx.Lock()
+	defer dsp.mtx.Unlock()
+
+	query := `SELECT id FROM job WHERE call_fqn=? AND shard=? AND attempt=?`
+	log.DbQuery(query, fqn, strconv.FormatInt(int64(shard), 10), strconv.FormatInt(int64(attempt), 10))
+	row := dsp.db.QueryRow(query, fqn, shard, attempt)
+
+	var entry JobEntry
+	entry.fqn = fqn
+	entry.shard = shard
+	entry.attempt = attempt
+
+	err := row.Scan(&entry.primaryKey)
+	if err != nil {
+		return nil, err
+	}
+
+	statusEntries, err := dsp.loadJobStatusEntries(entry.primaryKey, log)
+	if err != nil {
+		return nil, err
+	}
+	entry.statusEntries = statusEntries
+
+	return &entry, nil
+}
+
 func (dsp *MapleDb) loadJobStatusEntries(jobPrimaryKey int64, log *Logger) ([]*JobStatusEntry, error) {
 	var query = `SELECT id, status, date FROM job_status WHERE job_id=?`
 	log.DbQuery(query, strconv.FormatInt(jobPrimaryKey, 10))

@@ -129,9 +129,6 @@ func (wi *WorkflowInstance) Graph() *Graph {
 }
 
 func (wi *WorkflowInstance) isTerminal() *string {
-	wi.jobsMutex.Lock()
-	defer wi.jobsMutex.Unlock()
-
 	// A job is terminal if everything that could be run has been run
 	status := "Done"
 
@@ -182,8 +179,6 @@ func (wi *WorkflowInstance) jobInstanceFromJobEntry(entry *JobEntry) *JobInstanc
 }
 
 func (wi *WorkflowInstance) isAcceptingJobs() bool {
-	wi.jobsMutex.Lock()
-	defer wi.jobsMutex.Unlock()
 	return wi.shuttingDown == false && wi.aborting == false
 }
 
@@ -208,12 +203,37 @@ func (wi *WorkflowInstance) doneJobsHandler(doneJobs <-chan *JobInstance, runnab
 		return jobs
 	}
 
+	// TODO: this is initialization code and should not be in doneJobsHandler, maybe wi.init()?
 	if len(wi.entry.jobs) > 0 {
 		// Resuming jobs
 		for _, jobEntry := range wi.entry.jobs {
-			if jobEntry.LatestStatusEntry().status == "Started" {
+			latestStatusEntry := jobEntry.LatestStatusEntry()
+			switch latestStatusEntry.status {
+			case "NotStarted":
+				fallthrough
+			case "Started":
 				ji := wi.jobInstanceFromJobEntry(jobEntry)
 				launch(ji)
+			case "Done":
+				node := wi.Graph().Find(jobEntry.fqn)
+				if node == nil {
+					panic("cannot find node") // TODO
+				}
+
+				nodes := wi.Graph().Downstream(node)
+				var newNodes []*Node
+				for _, node := range nodes {
+					_, err := wi.db.LoadJobEntry(wi.log, node.name, 0, 1)
+					if err != nil {
+						newNodes = append(newNodes, node)
+					}
+				}
+				// TODO: duplicated from the else clause below
+				newJobs := persist(newNodes)
+				for _, job := range newJobs {
+					launch(job)
+				}
+
 			}
 		}
 	} else {
@@ -238,17 +258,16 @@ func (wi *WorkflowInstance) doneJobsHandler(doneJobs <-chan *JobInstance, runnab
 		terminalStatus := wi.isTerminal()
 		if terminalStatus != nil {
 			wi.setStatus(*terminalStatus)
-			workflowDone <- *terminalStatus
-			return
+			// TODO: no exit strategy!
+			go func() { workflowDone <- *terminalStatus }()
+		} else {
+			// TODO: no exit strategy!
+			go func(newJobs []*JobInstance) {
+				for _, job := range newJobs {
+					launch(job)
+				}
+			}(jobs)
 		}
-
-		// Use goroutine to submit jobs to the channel so this goroutine doesn't block
-		// TODO: no exit strategy!  Have this take a context.Context and use select {}
-		go func(newJobs []*JobInstance) {
-			for _, job := range newJobs {
-				launch(job)
-			}
-		}(jobs)
 	}
 }
 
@@ -308,7 +327,6 @@ func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Conte
 		} else {
 			select {
 			case ji := <-runnableJobs:
-				wi.jobsMutex.Lock()
 				log.Info("workflow: launching call: %s", ji.node().String())
 				wi.running[ji] = struct{}{}
 				jiCtx, jiCancel := context.WithCancel(ctx)
@@ -316,16 +334,13 @@ func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Conte
 				jiAbortCtx, jiAbort := context.WithCancel(context.Background())
 				ji.abort = jiAbort
 				go ji.run(wi.backend, exec.Command("sleep", "2"), jobDone, jiCtx, jiAbortCtx)
-				wi.jobsMutex.Unlock()
 			case <-workflowDone:
 				return
 			case ji := <-jobDone:
 				processDone(ji)
 			case <-ctx.Done():
-				wi.jobsMutex.Lock()
 				log.Info("workflow: shutdown...")
 				wi.shuttingDown = true
-				wi.jobsMutex.Unlock()
 				return
 			case <-abortCtx.Done():
 				log.Info("workflow: abort...")
@@ -363,16 +378,19 @@ func (kernel *Kernel) run(ctx context.Context) {
 
 	log.Info("kernel: enter")
 	defer func() {
+		kernel.log.Info("kernel.run exit (1)")
 		kernel.mutex.Lock()
 		kernel.on = false
 		kernel.mutex.Unlock()
+		kernel.log.Info("kernel.run exit (2)")
 		workflowWaitGroup.Wait()
+		kernel.log.Info("kernel.run exit (3)")
 		kernel.waitGroup.Done()
 		log.Info("kernel: exit")
 	}()
 
 	go func() {
-		resumableEntries, err := kernel.db.LoadWorkflowsByStatus(log, "Started")
+		resumableEntries, err := kernel.db.LoadWorkflowsByStatus(log, "Started", "NotStarted")
 		if err != nil {
 			panic(err) // TODO: don't panic
 		}
