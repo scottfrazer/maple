@@ -206,34 +206,41 @@ func (wi *WorkflowInstance) doneJobsHandler(doneJobs <-chan *JobInstance, runnab
 	// TODO: this is initialization code and should not be in doneJobsHandler, maybe wi.init()?
 	if len(wi.entry.jobs) > 0 {
 		// Resuming jobs
-		for _, jobEntry := range wi.entry.jobs {
-			latestStatusEntry := jobEntry.LatestStatusEntry()
-			switch latestStatusEntry.status {
-			case "NotStarted":
-				fallthrough
-			case "Started":
-				ji := wi.jobInstanceFromJobEntry(jobEntry)
-				launch(ji)
-			case "Done":
-				node := wi.Graph().Find(jobEntry.fqn)
-				if node == nil {
-					panic("cannot find node") // TODO
-				}
 
-				nodes := wi.Graph().Downstream(node)
-				var newNodes []*Node
-				for _, node := range nodes {
-					_, err := wi.db.LoadJobEntry(wi.log, node.name, 0, 1)
-					if err != nil {
-						newNodes = append(newNodes, node)
+		// TODO: no exit strategy!  This isTerminal check is duplicated below
+		terminalStatus := wi.isTerminal()
+		if terminalStatus != nil {
+			wi.setStatus(*terminalStatus)
+			go func() { workflowDone <- *terminalStatus }()
+		} else {
+			for _, jobEntry := range wi.entry.jobs {
+				latestStatusEntry := jobEntry.LatestStatusEntry()
+				switch latestStatusEntry.status {
+				case "NotStarted":
+					fallthrough
+				case "Started":
+					ji := wi.jobInstanceFromJobEntry(jobEntry)
+					launch(ji)
+				case "Done":
+					node := wi.Graph().Find(jobEntry.fqn)
+					if node == nil {
+						panic("cannot find node") // TODO
+					}
+
+					nodes := wi.Graph().Downstream(node)
+					var newNodes []*Node
+					for _, node := range nodes {
+						_, err := wi.db.LoadJobEntry(wi.log, wi.entry.primaryKey, node.name, 0, 1)
+						if err != nil {
+							newNodes = append(newNodes, node)
+						}
+					}
+					// TODO: duplicated from the else clause below
+					newJobs := persist(newNodes)
+					for _, job := range newJobs {
+						launch(job)
 					}
 				}
-				// TODO: duplicated from the else clause below
-				newJobs := persist(newNodes)
-				for _, job := range newJobs {
-					launch(job)
-				}
-
 			}
 		}
 	} else {
