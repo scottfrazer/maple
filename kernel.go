@@ -182,10 +182,30 @@ func (wi *WorkflowInstance) isAcceptingJobs() bool {
 	return wi.shuttingDown == false && wi.aborting == false
 }
 
-func (wi *WorkflowInstance) doneJobsHandler(doneJobs <-chan *JobInstance, runnableJobs chan<- *JobInstance, workflowDone chan<- string) {
-	var launch = func(job *JobInstance) {
+func (wi *WorkflowInstance) checkWorkflowTerminal(workflowDone chan<- string, ctx context.Context) bool {
+	terminalStatus := wi.isTerminal()
+	if terminalStatus != nil {
+		wi.setStatus(*terminalStatus)
+		go func(ctx context.Context) {
+			select {
+			case workflowDone <- *terminalStatus:
+			case <-ctx.Done():
+			}
+		}(ctx)
+		return true
+	}
+	return false
+}
+
+func (wi *WorkflowInstance) doneJobsHandler(doneJobs <-chan *JobInstance, runnableJobs chan<- *JobInstance, workflowDone chan<- string, ctx context.Context) {
+	var subCtx context.Context
+
+	var launch = func(job *JobInstance, ctx context.Context) {
 		if wi.isAcceptingJobs() {
-			runnableJobs <- job
+			select {
+			case runnableJobs <- job:
+			case <-ctx.Done():
+			}
 		}
 	}
 
@@ -206,40 +226,37 @@ func (wi *WorkflowInstance) doneJobsHandler(doneJobs <-chan *JobInstance, runnab
 	// TODO: this is initialization code and should not be in doneJobsHandler, maybe wi.init()?
 	if len(wi.entry.jobs) > 0 {
 		// Resuming jobs
+		subCtx, _ := context.WithCancel(ctx)
+		wi.checkWorkflowTerminal(workflowDone, subCtx)
 
-		// TODO: no exit strategy!  This isTerminal check is duplicated below
-		terminalStatus := wi.isTerminal()
-		if terminalStatus != nil {
-			wi.setStatus(*terminalStatus)
-			go func() { workflowDone <- *terminalStatus }()
-		} else {
-			for _, jobEntry := range wi.entry.jobs {
-				latestStatusEntry := jobEntry.LatestStatusEntry()
-				switch latestStatusEntry.status {
-				case "NotStarted":
-					fallthrough
-				case "Started":
-					ji := wi.jobInstanceFromJobEntry(jobEntry)
-					launch(ji)
-				case "Done":
-					node := wi.Graph().Find(jobEntry.fqn)
-					if node == nil {
-						panic("cannot find node") // TODO
-					}
+		for _, jobEntry := range wi.entry.jobs {
+			latestStatusEntry := jobEntry.LatestStatusEntry()
+			switch latestStatusEntry.status {
+			case "NotStarted":
+				fallthrough
+			case "Started":
+				ji := wi.jobInstanceFromJobEntry(jobEntry)
+				subCtx, _ = context.WithCancel(ctx)
+				launch(ji, subCtx)
+			case "Done":
+				node := wi.Graph().Find(jobEntry.fqn)
+				if node == nil {
+					panic("cannot find node") // TODO
+				}
 
-					nodes := wi.Graph().Downstream(node)
-					var newNodes []*Node
-					for _, node := range nodes {
-						_, err := wi.db.LoadJobEntry(wi.log, wi.entry.primaryKey, node.name, 0, 1)
-						if err != nil {
-							newNodes = append(newNodes, node)
-						}
+				nodes := wi.Graph().Downstream(node)
+				var newNodes []*Node
+				for _, node := range nodes {
+					_, err := wi.db.LoadJobEntry(wi.log, wi.entry.primaryKey, node.name, 0, 1)
+					if err != nil {
+						newNodes = append(newNodes, node)
 					}
-					// TODO: duplicated from the else clause below
-					newJobs := persist(newNodes)
-					for _, job := range newJobs {
-						launch(job)
-					}
+				}
+				// TODO: duplicated from the else clause below
+				newJobs := persist(newNodes)
+				for _, job := range newJobs {
+					subCtx, _ = context.WithCancel(ctx)
+					launch(job, subCtx)
 				}
 			}
 		}
@@ -247,7 +264,8 @@ func (wi *WorkflowInstance) doneJobsHandler(doneJobs <-chan *JobInstance, runnab
 		// Launching the root jobs
 		newJobs := persist(wi.Graph().Root())
 		for _, job := range newJobs {
-			launch(job)
+			subCtx, _ = context.WithCancel(ctx)
+			launch(job, subCtx)
 		}
 	}
 
@@ -261,20 +279,16 @@ func (wi *WorkflowInstance) doneJobsHandler(doneJobs <-chan *JobInstance, runnab
 		// Persist all new downstream nodes to the database first
 		jobs = persist(wi.Graph().Downstream(doneJob.node()))
 
-		// If at this stage every job is in a terminal state, the workflow is done.
-		terminalStatus := wi.isTerminal()
-		if terminalStatus != nil {
-			wi.setStatus(*terminalStatus)
-			// TODO: no exit strategy!
-			go func() { workflowDone <- *terminalStatus }()
-		} else {
-			// TODO: no exit strategy!
-			go func(newJobs []*JobInstance) {
-				for _, job := range newJobs {
-					launch(job)
-				}
-			}(jobs)
-		}
+		subCtx, _ = context.WithCancel(ctx)
+		wi.checkWorkflowTerminal(workflowDone, subCtx)
+
+		// TODO: no exit strategy!
+		go func(newJobs []*JobInstance) {
+			for _, job := range newJobs {
+				subCtx, _ = context.WithCancel(ctx)
+				launch(job, subCtx)
+			}
+		}(jobs)
 	}
 }
 
@@ -316,7 +330,8 @@ func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Conte
 		delete(wi.running, ji)
 	}
 
-	go wi.doneJobsHandler(doneJobs, runnableJobs, workflowDone)
+	subCtx, _ := context.WithCancel(ctx)
+	go wi.doneJobsHandler(doneJobs, runnableJobs, workflowDone, subCtx)
 
 	for {
 		if wi.isAcceptingJobs() == false {
