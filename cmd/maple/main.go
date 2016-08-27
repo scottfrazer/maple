@@ -139,7 +139,7 @@ func main() {
 	case server.FullCommand():
 		logger := maple.NewLogger().ToFile(*logPath).ToWriter(os.Stdout)
 		kernel := maple.NewKernel(logger, *dbDriver, *dbConnection, *concurrentWf, *queueSize)
-		kernel.RegisterBackend("testbackend", maple.NewTestBackend(time.Second*1, make(map[string]time.Duration)))
+		kernel.RegisterBackend("testbackend", maple.NewTestBackend(time.Second*2, make(map[string]time.Duration)))
 		kernel.On()
 
 		http.HandleFunc("/submit", maple.SubmitHttpEndpoint(kernel))

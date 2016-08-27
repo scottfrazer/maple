@@ -94,6 +94,8 @@ func (ji *JobInstance) run(backend Backend, cmd *exec.Cmd, done chan<- *JobInsta
 type WorkflowInstance struct {
 	entry        *WorkflowEntry
 	done         chan *WorkflowInstance
+	runnableJobs chan *JobInstance
+	doneJobs     chan *JobInstance
 	running      map[*JobInstance]struct{}
 	jobsMutex    *sync.Mutex
 	cancel       func()
@@ -197,33 +199,9 @@ func (wi *WorkflowInstance) checkWorkflowTerminal(workflowDone chan<- string, ct
 	return false
 }
 
-func (wi *WorkflowInstance) doneJobsHandler(doneJobs <-chan *JobInstance, runnableJobs chan<- *JobInstance, workflowDone chan<- string, ctx context.Context) {
+func (wi *WorkflowInstance) initJobs(workflowDone chan<- string, ctx context.Context) {
 	var subCtx context.Context
 
-	var launch = func(job *JobInstance, ctx context.Context) {
-		if wi.isAcceptingJobs() {
-			select {
-			case runnableJobs <- job:
-			case <-ctx.Done():
-			}
-		}
-	}
-
-	var persist = func(nodes []*Node) []*JobInstance {
-		jobs := make([]*JobInstance, len(nodes))
-		for index, node := range nodes {
-			job, err := wi.newJobInstance(node)
-			if err != nil {
-				// TODO: don't panic, should fail workflow
-				panic(err)
-			}
-			wi.entry.jobs = append(wi.entry.jobs, job.entry)
-			jobs[index] = job
-		}
-		return jobs
-	}
-
-	// TODO: this is initialization code and should not be in doneJobsHandler, maybe wi.init()?
 	if len(wi.entry.jobs) > 0 {
 		// Resuming jobs
 		subCtx, _ := context.WithCancel(ctx)
@@ -237,7 +215,7 @@ func (wi *WorkflowInstance) doneJobsHandler(doneJobs <-chan *JobInstance, runnab
 			case "Started":
 				ji := wi.jobInstanceFromJobEntry(jobEntry)
 				subCtx, _ = context.WithCancel(ctx)
-				launch(ji, subCtx)
+				go wi.launch(ji, subCtx)
 			case "Done":
 				node := wi.Graph().Find(jobEntry.fqn)
 				if node == nil {
@@ -253,23 +231,52 @@ func (wi *WorkflowInstance) doneJobsHandler(doneJobs <-chan *JobInstance, runnab
 					}
 				}
 				// TODO: duplicated from the else clause below
-				newJobs := persist(newNodes)
+				newJobs := wi.persist(newNodes)
 				for _, job := range newJobs {
 					subCtx, _ = context.WithCancel(ctx)
-					launch(job, subCtx)
+					go wi.launch(job, subCtx)
 				}
 			}
 		}
 	} else {
 		// Launching the root jobs
-		newJobs := persist(wi.Graph().Root())
+		newJobs := wi.persist(wi.Graph().Root())
 		for _, job := range newJobs {
 			subCtx, _ = context.WithCancel(ctx)
-			launch(job, subCtx)
+			go wi.launch(job, subCtx)
 		}
 	}
+	wi.log.Info("Exiting initJobs()")
+}
 
-	for doneJob := range doneJobs {
+// TODO don't require callers to launch this in a go-routine
+func (wi *WorkflowInstance) launch(job *JobInstance, ctx context.Context) {
+	if wi.isAcceptingJobs() {
+		select {
+		case wi.runnableJobs <- job:
+		case <-ctx.Done():
+		}
+	}
+}
+
+func (wi *WorkflowInstance) persist(nodes []*Node) []*JobInstance {
+	jobs := make([]*JobInstance, len(nodes))
+	for index, node := range nodes {
+		job, err := wi.newJobInstance(node)
+		if err != nil {
+			// TODO: don't panic, should fail workflow
+			panic(err)
+		}
+		wi.entry.jobs = append(wi.entry.jobs, job.entry)
+		jobs[index] = job
+	}
+	return jobs
+}
+
+func (wi *WorkflowInstance) doneJobsHandler(workflowDone chan<- string, ctx context.Context) {
+	var subCtx context.Context
+
+	for doneJob := range wi.doneJobs {
 		var jobs []*JobInstance
 
 		if doneJob.getStatus() != "Done" {
@@ -277,16 +284,15 @@ func (wi *WorkflowInstance) doneJobsHandler(doneJobs <-chan *JobInstance, runnab
 		}
 
 		// Persist all new downstream nodes to the database first
-		jobs = persist(wi.Graph().Downstream(doneJob.node()))
+		jobs = wi.persist(wi.Graph().Downstream(doneJob.node()))
 
 		subCtx, _ = context.WithCancel(ctx)
 		wi.checkWorkflowTerminal(workflowDone, subCtx)
 
-		// TODO: no exit strategy!
 		go func(newJobs []*JobInstance) {
 			for _, job := range newJobs {
 				subCtx, _ = context.WithCancel(ctx)
-				launch(job, subCtx)
+				wi.launch(job, subCtx)
 			}
 		}(jobs)
 	}
@@ -305,11 +311,9 @@ func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Conte
 
 	var jobDone = make(chan *JobInstance)
 	var workflowDone = make(chan string)
-	var runnableJobs = make(chan *JobInstance)
-	var doneJobs = make(chan *JobInstance)
 
 	defer func() {
-		close(doneJobs) // This will cause the doneJobsHandler() goroutine to exit
+		close(wi.doneJobs) // This will cause the doneJobsHandler() goroutine to exit
 
 		if wi.aborting {
 			wi.setStatus("Aborted")
@@ -326,12 +330,13 @@ func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Conte
 
 	var processDone = func(ji *JobInstance) {
 		log.Info("workflow: job finished: %s", ji.status())
-		doneJobs <- ji
+		wi.doneJobs <- ji
 		delete(wi.running, ji)
 	}
 
 	subCtx, _ := context.WithCancel(ctx)
-	go wi.doneJobsHandler(doneJobs, runnableJobs, workflowDone, subCtx)
+	wi.initJobs(workflowDone, ctx)
+	go wi.doneJobsHandler(workflowDone, subCtx)
 
 	for {
 		if wi.isAcceptingJobs() == false {
@@ -340,7 +345,7 @@ func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Conte
 			}
 
 			select {
-			case <-runnableJobs:
+			case <-wi.runnableJobs:
 			case ji := <-jobDone:
 				processDone(ji)
 			case <-workflowDone:
@@ -348,7 +353,7 @@ func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Conte
 			}
 		} else {
 			select {
-			case ji := <-runnableJobs:
+			case ji := <-wi.runnableJobs:
 				log.Info("workflow: launching call: %s", ji.node().String())
 				wi.running[ji] = struct{}{}
 				jiCtx, jiCancel := context.WithCancel(ctx)
@@ -529,6 +534,8 @@ func (kernel *Kernel) newWorkflowInstanceFromEntry(entry *WorkflowEntry) (*Workf
 	wi := WorkflowInstance{
 		entry:        entry,
 		done:         make(chan *WorkflowInstance, 1),
+		runnableJobs: make(chan *JobInstance),
+		doneJobs:     make(chan *JobInstance),
 		running:      make(map[*JobInstance]struct{}),
 		jobsMutex:    &jobsMutex,
 		cancel:       func() {},
