@@ -206,8 +206,7 @@ func (wi *WorkflowInstance) initJobs(workflowDone chan<- string, ctx context.Con
 			fallthrough
 		case "Started":
 			ji := wi.jobInstanceFromJobEntry(jobEntry)
-			subCtx, _ := context.WithCancel(ctx)
-			wi.launch(ji, subCtx)
+			wi.launch(ji, ctx)
 		case "Done":
 			node := wi.Graph().Find(jobEntry.fqn)
 			if node == nil {
@@ -226,7 +225,8 @@ func (wi *WorkflowInstance) initJobs(workflowDone chan<- string, ctx context.Con
 	wi.persistAndLaunch(newNodes, ctx)
 }
 
-func (wi *WorkflowInstance) launch(job *JobInstance, ctx context.Context) {
+func (wi *WorkflowInstance) launch(job *JobInstance, pctx context.Context) {
+	ctx, _ := context.WithCancel(pctx)
 	go func() {
 		if wi.isAcceptingJobs() {
 			select {
@@ -243,8 +243,7 @@ func (wi *WorkflowInstance) persistAndLaunch(nodes []*Node, pctx context.Context
 		return err
 	}
 	for _, job := range jobs {
-		ctx, _ := context.WithCancel(pctx)
-		wi.launch(job, ctx)
+		wi.launch(job, pctx)
 	}
 	return nil
 }
@@ -264,8 +263,6 @@ func (wi *WorkflowInstance) persist(nodes []*Node) ([]*JobInstance, error) {
 }
 
 func (wi *WorkflowInstance) doneJobsHandler(workflowDone chan<- string, ctx context.Context) {
-	var subCtx context.Context
-
 	for doneJob := range wi.doneJobs {
 		if doneJob.getStatus() != "Done" {
 			continue
@@ -285,8 +282,7 @@ func (wi *WorkflowInstance) doneJobsHandler(workflowDone chan<- string, ctx cont
 		}
 
 		for _, job := range jobs {
-			subCtx, _ = context.WithCancel(ctx)
-			wi.launch(job, subCtx)
+			wi.launch(job, ctx)
 		}
 	}
 }
