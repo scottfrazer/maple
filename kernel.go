@@ -160,15 +160,6 @@ func (wi *WorkflowInstance) setStatus(status string) error {
 	return nil
 }
 
-func (wi *WorkflowInstance) newJobInstance(node *Node) (*JobInstance, error) {
-	entry, err := wi.db.NewJobEntry(wi.entry.primaryKey, node.name, 0, 1, wi.log)
-	if err != nil {
-		return nil, err
-	}
-
-	return wi.jobInstanceFromJobEntry(entry), nil
-}
-
 func (wi *WorkflowInstance) jobInstanceFromJobEntry(entry *JobEntry) *JobInstance {
 	return &JobInstance{
 		entry:  entry,
@@ -183,19 +174,15 @@ func (wi *WorkflowInstance) isAcceptingJobs() bool {
 	return wi.shuttingDown == false && wi.aborting == false
 }
 
-func (wi *WorkflowInstance) checkWorkflowTerminal(workflowDone chan<- string, ctx context.Context) bool {
-	terminalStatus := wi.isTerminal()
-	if terminalStatus != nil {
-		wi.setStatus(*terminalStatus)
-		go func(ctx context.Context) {
-			select {
-			case workflowDone <- *terminalStatus:
-			case <-ctx.Done():
-			}
-		}(ctx)
-		return true
-	}
-	return false
+func (wi *WorkflowInstance) setWorkflowCompleted(status string, workflowDone chan<- string, pctx context.Context) {
+	ctx, _ := context.WithCancel(pctx)
+	wi.setStatus(status)
+	go func() {
+		select {
+		case workflowDone <- status:
+		case <-ctx.Done():
+		}
+	}()
 }
 
 func (wi *WorkflowInstance) initJobs(workflowDone chan<- string, ctx context.Context) {
@@ -205,11 +192,13 @@ func (wi *WorkflowInstance) initJobs(workflowDone chan<- string, ctx context.Con
 		return
 	}
 
+	terminalStatus := wi.isTerminal()
+	if terminalStatus != nil {
+		wi.setWorkflowCompleted(*terminalStatus, workflowDone, ctx)
+	}
+
 	// Otherwise, this is a workflow in progress.  Re-launch everything that's 'started'
 	var newNodes []*Node
-	subCtx, _ := context.WithCancel(ctx)
-	wi.checkWorkflowTerminal(workflowDone, subCtx)
-
 	for _, jobEntry := range wi.entry.jobs {
 		latestStatusEntry := jobEntry.LatestStatusEntry()
 		switch latestStatusEntry.status {
@@ -217,7 +206,7 @@ func (wi *WorkflowInstance) initJobs(workflowDone chan<- string, ctx context.Con
 			fallthrough
 		case "Started":
 			ji := wi.jobInstanceFromJobEntry(jobEntry)
-			subCtx, _ = context.WithCancel(ctx)
+			subCtx, _ := context.WithCancel(ctx)
 			wi.launch(ji, subCtx)
 		case "Done":
 			node := wi.Graph().Find(jobEntry.fqn)
@@ -234,7 +223,6 @@ func (wi *WorkflowInstance) initJobs(workflowDone chan<- string, ctx context.Con
 			}
 		}
 	}
-
 	wi.persistAndLaunch(newNodes, ctx)
 }
 
@@ -249,44 +237,52 @@ func (wi *WorkflowInstance) launch(job *JobInstance, ctx context.Context) {
 	}()
 }
 
-func (wi *WorkflowInstance) persistAndLaunch(nodes []*Node, pctx context.Context) {
-	jobs := wi.persist(nodes)
+func (wi *WorkflowInstance) persistAndLaunch(nodes []*Node, pctx context.Context) error {
+	jobs, err := wi.persist(nodes)
+	if err != nil {
+		return err
+	}
 	for _, job := range jobs {
 		ctx, _ := context.WithCancel(pctx)
 		wi.launch(job, ctx)
 	}
+	return nil
 }
 
-func (wi *WorkflowInstance) persist(nodes []*Node) []*JobInstance {
+func (wi *WorkflowInstance) persist(nodes []*Node) ([]*JobInstance, error) {
 	jobs := make([]*JobInstance, len(nodes))
 	for index, node := range nodes {
-		job, err := wi.newJobInstance(node)
+		entry, err := wi.db.NewJobEntry(wi.entry.primaryKey, node.name, 0, 1, wi.log)
 		if err != nil {
-			// TODO: don't panic, should fail workflow
-			panic(err)
+			return nil, err
 		}
+		job := wi.jobInstanceFromJobEntry(entry)
 		wi.entry.jobs = append(wi.entry.jobs, job.entry)
 		jobs[index] = job
 	}
-	return jobs
+	return jobs, nil
 }
 
 func (wi *WorkflowInstance) doneJobsHandler(workflowDone chan<- string, ctx context.Context) {
 	var subCtx context.Context
 
 	for doneJob := range wi.doneJobs {
-		var jobs []*JobInstance
-
 		if doneJob.getStatus() != "Done" {
 			continue
 		}
 
 		// Persist all new downstream nodes to the database first
-		jobs = wi.persist(wi.Graph().Downstream(doneJob.node()))
+		jobs, err := wi.persist(wi.Graph().Downstream(doneJob.node()))
+
+		if err != nil {
+			// TODO set
+		}
 
 		// This might have been the last job, maybe workflow is completed
-		subCtx, _ = context.WithCancel(ctx)
-		wi.checkWorkflowTerminal(workflowDone, subCtx)
+		terminalStatus := wi.isTerminal()
+		if terminalStatus != nil {
+			wi.setWorkflowCompleted(*terminalStatus, workflowDone, ctx)
+		}
 
 		for _, job := range jobs {
 			subCtx, _ = context.WithCancel(ctx)
@@ -402,13 +398,10 @@ func (kernel *Kernel) run(ctx context.Context) {
 
 	log.Info("kernel: enter")
 	defer func() {
-		kernel.log.Info("kernel.run exit (1)")
 		kernel.mutex.Lock()
 		kernel.on = false
 		kernel.mutex.Unlock()
-		kernel.log.Info("kernel.run exit (2)")
 		workflowWaitGroup.Wait()
-		kernel.log.Info("kernel.run exit (3)")
 		kernel.waitGroup.Done()
 		log.Info("kernel: exit")
 	}()
@@ -600,7 +593,7 @@ func (kernel *Kernel) Run(wdl, inputs, options, backend string, id uuid.UUID) (*
 	if err != nil {
 		return nil, err
 	}
-	wi, err := kernel.Wait(id, time.Hour*1000) // TODO: infinite timeout?
+	wi, err := kernel.Wait(id, time.Hour*1000)
 	if err != nil {
 		return nil, err
 	}
