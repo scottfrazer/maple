@@ -135,7 +135,6 @@ func (wi *WorkflowInstance) isTerminal() *string {
 	status := "Done"
 
 	for _, jobEntry := range wi.entry.jobs {
-		// TODO: JobEntry.Status() ???
 		jobStatus := jobEntry.LatestStatusEntry().status
 		if jobStatus == "Failed" {
 			status = "Failed"
@@ -200,62 +199,61 @@ func (wi *WorkflowInstance) checkWorkflowTerminal(workflowDone chan<- string, ct
 }
 
 func (wi *WorkflowInstance) initJobs(workflowDone chan<- string, ctx context.Context) {
-	var subCtx context.Context
+	// If workflow has not been started yet, launch the root nodes
+	if len(wi.entry.jobs) == 0 {
+		wi.persistAndLaunch(wi.Graph().Root(), ctx)
+		return
+	}
 
-	if len(wi.entry.jobs) > 0 {
-		// Resuming jobs
-		subCtx, _ := context.WithCancel(ctx)
-		wi.checkWorkflowTerminal(workflowDone, subCtx)
+	// Otherwise, this is a workflow in progress.  Re-launch everything that's 'started'
+	var newNodes []*Node
+	subCtx, _ := context.WithCancel(ctx)
+	wi.checkWorkflowTerminal(workflowDone, subCtx)
 
-		for _, jobEntry := range wi.entry.jobs {
-			latestStatusEntry := jobEntry.LatestStatusEntry()
-			switch latestStatusEntry.status {
-			case "NotStarted":
-				fallthrough
-			case "Started":
-				ji := wi.jobInstanceFromJobEntry(jobEntry)
-				subCtx, _ = context.WithCancel(ctx)
-				go wi.launch(ji, subCtx)
-			case "Done":
-				node := wi.Graph().Find(jobEntry.fqn)
-				if node == nil {
-					panic("cannot find node") // TODO
-				}
+	for _, jobEntry := range wi.entry.jobs {
+		latestStatusEntry := jobEntry.LatestStatusEntry()
+		switch latestStatusEntry.status {
+		case "NotStarted":
+			fallthrough
+		case "Started":
+			ji := wi.jobInstanceFromJobEntry(jobEntry)
+			subCtx, _ = context.WithCancel(ctx)
+			wi.launch(ji, subCtx)
+		case "Done":
+			node := wi.Graph().Find(jobEntry.fqn)
+			if node == nil {
+				panic("cannot find node") // TODO
+			}
 
-				nodes := wi.Graph().Downstream(node)
-				var newNodes []*Node
-				for _, node := range nodes {
-					_, err := wi.db.LoadJobEntry(wi.log, wi.entry.primaryKey, node.name, 0, 1)
-					if err != nil {
-						newNodes = append(newNodes, node)
-					}
-				}
-				// TODO: duplicated from the else clause below
-				newJobs := wi.persist(newNodes)
-				for _, job := range newJobs {
-					subCtx, _ = context.WithCancel(ctx)
-					go wi.launch(job, subCtx)
+			nodes := wi.Graph().Downstream(node)
+			for _, node := range nodes {
+				_, err := wi.db.LoadJobEntry(wi.log, wi.entry.primaryKey, node.name, 0, 1)
+				if err != nil {
+					newNodes = append(newNodes, node)
 				}
 			}
 		}
-	} else {
-		// Launching the root jobs
-		newJobs := wi.persist(wi.Graph().Root())
-		for _, job := range newJobs {
-			subCtx, _ = context.WithCancel(ctx)
-			go wi.launch(job, subCtx)
-		}
 	}
-	wi.log.Info("Exiting initJobs()")
+
+	wi.persistAndLaunch(newNodes, ctx)
 }
 
-// TODO don't require callers to launch this in a go-routine
 func (wi *WorkflowInstance) launch(job *JobInstance, ctx context.Context) {
-	if wi.isAcceptingJobs() {
-		select {
-		case wi.runnableJobs <- job:
-		case <-ctx.Done():
+	go func() {
+		if wi.isAcceptingJobs() {
+			select {
+			case wi.runnableJobs <- job:
+			case <-ctx.Done():
+			}
 		}
+	}()
+}
+
+func (wi *WorkflowInstance) persistAndLaunch(nodes []*Node, pctx context.Context) {
+	jobs := wi.persist(nodes)
+	for _, job := range jobs {
+		ctx, _ := context.WithCancel(pctx)
+		wi.launch(job, ctx)
 	}
 }
 
@@ -286,15 +284,14 @@ func (wi *WorkflowInstance) doneJobsHandler(workflowDone chan<- string, ctx cont
 		// Persist all new downstream nodes to the database first
 		jobs = wi.persist(wi.Graph().Downstream(doneJob.node()))
 
+		// This might have been the last job, maybe workflow is completed
 		subCtx, _ = context.WithCancel(ctx)
 		wi.checkWorkflowTerminal(workflowDone, subCtx)
 
-		go func(newJobs []*JobInstance) {
-			for _, job := range newJobs {
-				subCtx, _ = context.WithCancel(ctx)
-				wi.launch(job, subCtx)
-			}
-		}(jobs)
+		for _, job := range jobs {
+			subCtx, _ = context.WithCancel(ctx)
+			wi.launch(job, subCtx)
+		}
 	}
 }
 
@@ -603,7 +600,7 @@ func (kernel *Kernel) Run(wdl, inputs, options, backend string, id uuid.UUID) (*
 	if err != nil {
 		return nil, err
 	}
-	wi, err := kernel.Wait(id, time.Hour*100) // TODO: infinite timeout?
+	wi, err := kernel.Wait(id, time.Hour*1000) // TODO: infinite timeout?
 	if err != nil {
 		return nil, err
 	}
