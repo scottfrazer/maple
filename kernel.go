@@ -272,7 +272,8 @@ func (wi *WorkflowInstance) doneJobsHandler(workflowDone chan<- string, ctx cont
 		jobs, err := wi.persist(wi.Graph().Downstream(doneJob.node()))
 
 		if err != nil {
-			// TODO set
+			wi.setWorkflowCompleted("Failed", workflowDone, ctx)
+			continue
 		}
 
 		// This might have been the last job, maybe workflow is completed
@@ -439,8 +440,7 @@ func (kernel *Kernel) run(ctx context.Context) {
 			case wi, ok := <-kernel.submitChannel:
 				if ok {
 					if wi.aborting {
-						wi.setStatus("Aborted")
-						go func() { workflowDone <- wi }()
+						wi.setWorkflowCompleted("Aborted", workflowDone, ctx)
 						continue
 					}
 					workers++
@@ -509,14 +509,13 @@ func (kernel *Kernel) newWorkflowInstance(uuid uuid.UUID, source *WorkflowSource
 }
 
 func (kernel *Kernel) newWorkflowInstanceFromEntry(entry *WorkflowEntry) (*WorkflowInstance, error) {
-	var jobsMutex sync.Mutex
-
 	kernel.backendsMutex.Lock()
 	if _, ok := kernel.backends[entry.backend]; !ok {
 		return nil, errors.New(fmt.Sprintf("No backend named '%s' found", entry.backend))
 	}
 	kernel.backendsMutex.Unlock()
 
+	var jobsMutex sync.Mutex
 	wi := WorkflowInstance{
 		entry:        entry,
 		done:         make(chan *WorkflowInstance, 1),
