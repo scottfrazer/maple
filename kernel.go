@@ -440,7 +440,8 @@ func (kernel *Kernel) run(ctx context.Context) {
 			case wi, ok := <-kernel.submitChannel:
 				if ok {
 					if wi.aborting {
-						wi.setWorkflowCompleted("Aborted", workflowDone, ctx)
+						wi.setStatus("Aborted")
+						go func() { workflowDone <- wi }()
 						continue
 					}
 					workers++
