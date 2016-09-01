@@ -372,19 +372,20 @@ func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Conte
 }
 
 type Kernel struct {
-	log                *Logger
-	db                 *MapleDb
-	start              time.Time
-	on                 bool
-	maxWorkers         int
-	submitChannel      chan *WorkflowInstance
-	mutex              *sync.Mutex
-	running            map[*WorkflowInstance]struct{}
-	cancel             func()
-	waitGroup          *sync.WaitGroup
-	workflowMaxRuntime time.Duration
-	backends           map[string]Backend
-	backendsMutex      *sync.Mutex
+	log                  *Logger
+	db                   *MapleDb
+	start                time.Time
+	on                   bool
+	maxWorkers           int
+	submitChannel        chan *WorkflowInstance
+	mutex                *sync.Mutex
+	running              map[*WorkflowInstance]struct{}
+	cancel               func()
+	waitGroup            *sync.WaitGroup
+	hasProcessedRestarts *sync.WaitGroup
+	workflowMaxRuntime   time.Duration
+	backends             map[string]Backend
+	backendsMutex        *sync.Mutex
 }
 
 func (kernel *Kernel) run(ctx context.Context) {
@@ -403,20 +404,19 @@ func (kernel *Kernel) run(ctx context.Context) {
 		log.Info("kernel: exit")
 	}()
 
-	go func() {
-		resumableEntries, err := kernel.db.LoadWorkflowsByStatus(log, "Started", "NotStarted")
+	resumableEntries, err := kernel.db.LoadWorkflowsByStatus(log, "Started", "NotStarted")
+	if err != nil {
+		panic(err) // TODO: don't panic
+	}
+	for _, entry := range resumableEntries {
+		log.Info("kernel: resume workflow %s", entry.uuid)
+		wi, err := kernel.newWorkflowInstanceFromEntry(entry)
 		if err != nil {
 			panic(err) // TODO: don't panic
 		}
-		for _, entry := range resumableEntries {
-			log.Info("kernel: resume workflow %s", entry.uuid)
-			wi, err := kernel.newWorkflowInstanceFromEntry(entry)
-			if err != nil {
-				panic(err) // TODO: don't panic
-			}
-			kernel.enqueue(wi, time.Minute)
-		}
-	}()
+		go kernel.enqueue(wi, time.Minute)
+	}
+	kernel.hasProcessedRestarts.Done()
 
 	var processDone = func(result *WorkflowInstance) {
 		log.Info("kernel: workflow %s finished: %s", result.Uuid(), result.Status())
@@ -440,8 +440,10 @@ func (kernel *Kernel) run(ctx context.Context) {
 			case wi, ok := <-kernel.submitChannel:
 				if ok {
 					if wi.aborting {
+						// In the case where we aborted it before we read it off the channel
 						wi.setStatus("Aborted")
-						go func() { workflowDone <- wi }()
+						processDone(wi)
+						wi.done <- wi
 						continue
 					}
 					workers++
@@ -538,24 +540,27 @@ func (kernel *Kernel) newWorkflowInstanceFromEntry(entry *WorkflowEntry) (*Workf
 
 func NewKernel(log *Logger, dbName string, dbConnection string, concurrentWorkflows int, submitQueueSize int) *Kernel {
 	var wg sync.WaitGroup
+	var restartsWg sync.WaitGroup
+	restartsWg.Add(1)
 	var mutex sync.Mutex
 	var backendsMutex sync.Mutex
 	// TODO: move DB creation into On()?  Semantics should be: zero DB connections on Off()
 	db := NewMapleDb(dbName, dbConnection, log)
 	kernel := Kernel{
-		log:                log,
-		db:                 db,
-		start:              time.Now(),
-		on:                 false,
-		maxWorkers:         concurrentWorkflows,
-		submitChannel:      make(chan *WorkflowInstance, submitQueueSize),
-		mutex:              &mutex,
-		running:            make(map[*WorkflowInstance]struct{}),
-		cancel:             func() {},
-		waitGroup:          &wg,
-		workflowMaxRuntime: time.Second * 600,
-		backends:           make(map[string]Backend),
-		backendsMutex:      &backendsMutex}
+		log:                  log,
+		db:                   db,
+		start:                time.Now(),
+		on:                   false,
+		maxWorkers:           concurrentWorkflows,
+		submitChannel:        make(chan *WorkflowInstance, submitQueueSize),
+		mutex:                &mutex,
+		running:              make(map[*WorkflowInstance]struct{}),
+		cancel:               func() {},
+		waitGroup:            &wg,
+		hasProcessedRestarts: &restartsWg,
+		workflowMaxRuntime:   time.Second * 600,
+		backends:             make(map[string]Backend),
+		backendsMutex:        &backendsMutex}
 	return &kernel
 }
 
@@ -589,15 +594,29 @@ func (kernel *Kernel) Run(wdl, inputs, options, backend string, id uuid.UUID) (*
 	if err != nil {
 		return nil, err
 	}
-	wi, err := kernel.Wait(id, time.Hour*1000)
-	if err != nil {
-		return nil, err
+	kernel.Wait(id, time.Hour*1000)
+	wi := kernel.SnapshotOf(id)
+	if wi == nil {
+		return nil, errors.New(fmt.Sprintf("Could not find workflow %s : %s", id, err))
 	}
 	return wi, nil
 }
 
+func (kernel *Kernel) SnapshotOf(id uuid.UUID) *WorkflowInstance {
+	entry, err := kernel.db.LoadWorkflow(id, kernel.log)
+	if err != nil {
+		return nil
+	}
+	wi, err := kernel.newWorkflowInstanceFromEntry(entry)
+	if err != nil {
+		return nil
+	}
+	return wi
+}
+
 func (kernel *Kernel) Submit(wdl, inputs, options, backend string, id uuid.UUID, timeout time.Duration) error {
 	sources := WorkflowSources{strings.TrimSpace(wdl), strings.TrimSpace(inputs), strings.TrimSpace(options), nil}
+	kernel.hasProcessedRestarts.Wait()
 	wi, err := kernel.newWorkflowInstance(id, &sources, backend)
 	if err != nil {
 		return err
@@ -611,13 +630,12 @@ func (kernel *Kernel) Submit(wdl, inputs, options, backend string, id uuid.UUID,
 	return nil
 }
 
-func (kernel *Kernel) Wait(id uuid.UUID, timeout time.Duration) (*WorkflowInstance, error) {
+func (kernel *Kernel) Wait(id uuid.UUID, timeout time.Duration) {
 	wi := kernel.find(id)
 	if wi == nil {
-		return nil, errors.New(fmt.Sprintf("Could not find running workflow %s", id))
+		return
 	}
 	<-wi.done
-	return wi, nil
 }
 
 func (kernel *Kernel) find(id uuid.UUID) *WorkflowInstance {
@@ -636,13 +654,8 @@ func (kernel *Kernel) Abort(id uuid.UUID, timeout time.Duration) error {
 	if wi == nil {
 		return errors.New(fmt.Sprintf("Could not find running workflow %s", id))
 	}
-
 	wi.Abort()
-
-	_, err := kernel.Wait(id, timeout)
-	if err != nil {
-		return err
-	}
+	kernel.Wait(id, timeout)
 	return nil
 }
 

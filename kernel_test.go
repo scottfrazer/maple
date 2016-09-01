@@ -2,7 +2,6 @@ package maple
 
 import (
 	"bytes"
-	"fmt"
 	"github.com/satori/go.uuid"
 	"io/ioutil"
 	"os"
@@ -36,7 +35,7 @@ func TestMain(m *testing.M) {
 func TestRunWorkflow(t *testing.T) {
 	var buf bytes.Buffer
 	uuid := uuid.NewV4()
-	kernel := NewKernel(NewLogger().ToWriter(&buf).ToWriter(os.Stdout), "sqlite3", tmpFile(t), 1, 1)
+	kernel := NewKernel(NewLogger().ToWriter(&buf), "sqlite3", tmpFile(t), 1, 1)
 	m := make(map[string]time.Duration)
 	m["A"] = time.Second * 5
 	kernel.RegisterBackend("testbackend", NewTestBackend(time.Second*0, m))
@@ -53,12 +52,8 @@ func TestRunWorkflow(t *testing.T) {
 		t.Fatalf("fatal: %s", err)
 	}
 
-	wi, err := kernel.Wait(uuid, time.Second*60)
-	fmt.Println(buf.String())
-
-	if err != nil {
-		t.Fatalf("Got error trying to run workflow: %s", err)
-	}
+	kernel.Wait(uuid, time.Second*60)
+	wi := kernel.SnapshotOf(uuid)
 
 	if wi.Status() != "Aborted" {
 		t.Fatalf("Expecting workflow status to be 'Aborted', got %s", wi.Status())
