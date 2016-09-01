@@ -36,9 +36,9 @@ func TestRunWorkflow(t *testing.T) {
 	var buf bytes.Buffer
 	uuid := uuid.NewV4()
 	kernel := NewKernel(NewLogger().ToWriter(&buf), "sqlite3", tmpFile(t), 1, 1)
-	m := make(map[string]time.Duration)
-	m["A"] = time.Second * 5
-	kernel.RegisterBackend("testbackend", NewTestBackend(time.Second*0, m))
+	backend := NewTestBackend(time.Second * 0)
+	backend.SetRuntime("A", time.Second*5)
+	kernel.RegisterBackend("testbackend", backend)
 	kernel.On()
 	err := kernel.Submit("[1]A[2]\n[A]B[3,4]", "inputs", "options", "testbackend", uuid, time.Second)
 
@@ -62,5 +62,4 @@ func TestRunWorkflow(t *testing.T) {
 	if wi.Uuid() != uuid {
 		t.Fatalf("Expecting workflow instance UUID to be %s (got %s)", uuid, wi.Uuid())
 	}
-
 }

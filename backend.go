@@ -38,10 +38,16 @@ type TestBackend struct {
 	jobRuntime        map[string]time.Duration
 }
 
-func NewTestBackend(defaultJobRuntime time.Duration, jobRuntime map[string]time.Duration) Backend {
+func NewTestBackend(defaultJobRuntime time.Duration) TestBackend {
 	var mutex sync.Mutex
-	be := TestBackend{0, make(map[int]*TestBackendJob), &mutex, defaultJobRuntime, jobRuntime}
+	be := TestBackend{0, make(map[int]*TestBackendJob), &mutex, defaultJobRuntime, make(map[string]time.Duration)}
 	return be
+}
+
+func (be TestBackend) SetRuntime(job string, duration time.Duration) {
+	be.jobsMutex.Lock()
+	defer be.jobsMutex.Unlock()
+	be.jobRuntime[job] = duration
 }
 
 func (be TestBackend) Init() error {
