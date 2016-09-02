@@ -40,7 +40,12 @@ type TestBackend struct {
 
 func NewTestBackend(defaultJobRuntime time.Duration) TestBackend {
 	var mutex sync.Mutex
-	be := TestBackend{0, make(map[int]*TestBackendJob), &mutex, defaultJobRuntime, make(map[string]time.Duration)}
+	be := TestBackend{
+		counter:           0,
+		jobs:              make(map[int]*TestBackendJob),
+		jobsMutex:         &mutex,
+		defaultJobRuntime: defaultJobRuntime,
+		jobRuntime:        make(map[string]time.Duration)}
 	return be
 }
 
