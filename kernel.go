@@ -374,6 +374,8 @@ func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Conte
 type Kernel struct {
 	log                  *Logger
 	db                   *MapleDb
+	dbName               string
+	dbConnection         string
 	start                time.Time
 	on                   bool
 	maxWorkers           int
@@ -544,13 +546,11 @@ func NewKernel(log *Logger, dbName string, dbConnection string, concurrentWorkfl
 	restartsWg.Add(1)
 	var mutex sync.Mutex
 	var backendsMutex sync.Mutex
-	// TODO: move DB creation into On()?  Semantics should be: zero DB connections on Off()
-	// To test, create a file not writeable by current user and try to use it for dbConnection
-	// Where does it fail?  Here or on On()?  Should probably fail on On()
-	db := NewMapleDb(dbName, dbConnection, log)
 	kernel := Kernel{
 		log:                  log,
-		db:                   db,
+		db:                   nil,
+		dbName:               dbName,
+		dbConnection:         dbConnection,
 		start:                time.Now(),
 		on:                   false,
 		maxWorkers:           concurrentWorkflows,
@@ -578,6 +578,7 @@ func (kernel *Kernel) On() {
 	kernel.on = true
 	kernel.cancel = cancel
 	kernel.waitGroup.Add(1)
+	kernel.db = NewMapleDb(kernel.dbName, kernel.dbConnection, kernel.log)
 	go kernel.run(ctx)
 	kernel.signalHandler() // TODO: make this part of kernel.run(), also make it shutdown on Off()
 }
@@ -587,6 +588,8 @@ func (kernel *Kernel) Off() {
 		return
 	}
 
+	kernel.db.Close()
+	kernel.db = nil
 	kernel.cancel()
 	kernel.waitGroup.Wait()
 }

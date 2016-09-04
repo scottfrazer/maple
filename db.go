@@ -105,7 +105,7 @@ func NewMapleDb(driverName, dataSourceName string, log *Logger) *MapleDb {
 }
 
 func (dsp *MapleDb) Close() {
-	// TODO: close dsp.db
+	dsp.db.Close()
 }
 
 func (dsp *MapleDb) tables() ([]string, error) {
