@@ -396,6 +396,8 @@ func (kernel *Kernel) run(ctx context.Context) {
 	var workflowDone = make(chan *WorkflowInstance)
 	var log = kernel.log
 
+	kernel.signalHandler(ctx)
+
 	log.Info("kernel: enter")
 	defer func() {
 		kernel.mutex.Lock()
@@ -475,17 +477,20 @@ func (kernel *Kernel) run(ctx context.Context) {
 	}
 }
 
-// TODO: do I still need this?
-func (kernel Kernel) signalHandler() {
+func (kernel Kernel) signalHandler(pctx context.Context) {
 	sigs := make(chan os.Signal, 1)
+	ctx, _ := context.WithCancel(pctx)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func(kernel Kernel) {
-		sig := <-sigs
-		kernel.log.Info("%s signal detected... turning off kernel", sig)
-		kernel.cancel()
-		kernel.waitGroup.Wait()
-		kernel.log.Info("%s signal detected... kernel off", sig)
-		os.Exit(130)
+		select {
+		case sig := <-sigs:
+			kernel.log.Info("%s signal detected... turning off kernel", sig)
+			kernel.cancel()
+			kernel.waitGroup.Wait()
+			kernel.log.Info("%s signal detected... kernel off", sig)
+			os.Exit(130)
+		case <-ctx.Done():
+		}
 	}(kernel)
 }
 
@@ -580,7 +585,6 @@ func (kernel *Kernel) On() {
 	kernel.waitGroup.Add(1)
 	kernel.db = NewMapleDb(kernel.dbName, kernel.dbConnection, kernel.log)
 	go kernel.run(ctx)
-	kernel.signalHandler() // TODO: make this part of kernel.run(), also make it shutdown on Off()
 }
 
 func (kernel *Kernel) Off() {
