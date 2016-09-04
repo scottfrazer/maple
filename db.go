@@ -6,7 +6,6 @@ import (
 	"fmt"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/satori/go.uuid"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -224,8 +223,7 @@ func (dsp *MapleDb) NewJobEntry(workflowPrimaryKey int64, fqn string, shard, att
 	}
 
 	query := `INSERT INTO job (workflow_id, call_fqn, shard, attempt) VALUES (?, ?, ?, ?)`
-	// TODO: DbQuery really needs to be able to take integers as parameters
-	log.DbQuery(query, strconv.FormatInt(workflowPrimaryKey, 10), fqn, strconv.FormatInt(int64(shard), 10), strconv.FormatInt(int64(attempt), 10))
+	log.DbQuery(query, workflowPrimaryKey, fqn, shard, attempt)
 	res, err := tx.Exec(query, workflowPrimaryKey, fqn, shard, attempt)
 	if err != nil {
 		return nil, err
@@ -271,7 +269,7 @@ func (dsp *MapleDb) NewJobStatusEntry(jobPrimaryKey int64, status string, date t
 func (dsp *MapleDb) newJobStatusEntry(jobPrimaryKey int64, status string, date time.Time, log *Logger, exec dbExecFunc) (*JobStatusEntry, error) {
 	date8601 := date.Format("2006-01-02 15:04:05.999")
 	query := `INSERT INTO job_status (job_id, status, date) VALUES (?, ?, ?)`
-	log.DbQuery(query, strconv.FormatInt(jobPrimaryKey, 10), status, date8601)
+	log.DbQuery(query, jobPrimaryKey, status, date8601)
 	res, err := exec(query, jobPrimaryKey, status, date8601)
 	if err != nil {
 		return nil, err
@@ -366,7 +364,7 @@ func (dsp *MapleDb) NewWorkflowEntry(uuid uuid.UUID, wdl, inputs, options, backe
 
 func (dsp *MapleDb) newWorkflowSourcesEntry(workflowPrimaryKey int64, wdl, inputs, options string, log *Logger, exec dbExecFunc) (*WorkflowSourcesEntry, error) {
 	query := `INSERT INTO workflow_sources (workflow_id, wdl, inputs, options) VALUES (?, ?, ?, ?)`
-	log.DbQuery(query, strconv.FormatInt(workflowPrimaryKey, 10), "{omit}", "{omit}", "{omit}")
+	log.DbQuery(query, workflowPrimaryKey, "{omit}", "{omit}", "{omit}")
 	res, err := exec(query, workflowPrimaryKey, wdl, inputs, options)
 	if err != nil {
 		return nil, err
@@ -391,7 +389,7 @@ func (dsp *MapleDb) newWorkflowSourcesEntry(workflowPrimaryKey int64, wdl, input
 func (dsp *MapleDb) newWorkflowStatusEntry(workflowPrimaryKey int64, status string, date time.Time, log *Logger, exec dbExecFunc) (*WorkflowStatusEntry, error) {
 	date8601 := date.Format("2006-01-02 15:04:05.999")
 	query := `INSERT INTO workflow_status (workflow_id, status, date) VALUES (?, ?, ?)`
-	log.DbQuery(query, strconv.FormatInt(workflowPrimaryKey, 10), status, date8601)
+	log.DbQuery(query, workflowPrimaryKey, status, date8601)
 	res, err := exec(query, workflowPrimaryKey, status, date8601)
 	if err != nil {
 		return nil, err
@@ -687,7 +685,7 @@ func (dsp *MapleDb) LoadJobEntry(log *Logger, workflowId int64, fqn string, shar
 	defer dsp.mtx.Unlock()
 
 	query := `SELECT id FROM job WHERE call_fqn=? AND shard=? AND attempt=? AND workflow_id=?`
-	log.DbQuery(query, fqn, strconv.FormatInt(int64(shard), 10), strconv.FormatInt(int64(attempt), 10), strconv.FormatInt(workflowId, 10))
+	log.DbQuery(query, fqn, shard, attempt, workflowId)
 	row := dsp.db.QueryRow(query, fqn, shard, attempt, workflowId)
 
 	var entry JobEntry
@@ -726,7 +724,7 @@ func (dsp *MapleDb) scanJobStatusEntry(rows *sql.Rows) (*JobStatusEntry, error) 
 func (dsp *MapleDb) loadJobStatusEntries(jobPrimaryKey int64, log *Logger) ([]*JobStatusEntry, error) {
 	var entries []*JobStatusEntry
 	var query = `SELECT id, job_id, status, date FROM job_status WHERE job_id=?`
-	log.DbQuery(query, strconv.FormatInt(jobPrimaryKey, 10))
+	log.DbQuery(query, jobPrimaryKey)
 	rows, err := dsp.db.Query(query, jobPrimaryKey)
 	if err != nil {
 		return nil, err
