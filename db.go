@@ -644,17 +644,11 @@ func (dsp *MapleDb) loadWorkflowsByPrimaryKey(log *Logger, ids ...int64) ([]*Wor
 		defer rows.Close()
 
 		for rows.Next() {
-			var entry JobStatusEntry
-			var date string
-			err = rows.Scan(&entry.primaryKey, &entry.jobId, &entry.status, &date)
+			entry, err := dsp.scanJobStatusEntry(rows)
 			if err != nil {
 				return nil, err
 			}
-			entry.date, err = time.Parse("2006-01-02 15:04:05.999", date)
-			if err != nil {
-				return nil, err
-			}
-			jobStatusEntries[entry.jobId] = append(jobStatusEntries[entry.jobId], &entry)
+			jobStatusEntries[entry.jobId] = append(jobStatusEntries[entry.jobId], entry)
 		}
 
 		err = rows.Err()
@@ -715,32 +709,34 @@ func (dsp *MapleDb) LoadJobEntry(log *Logger, workflowId int64, fqn string, shar
 	return &entry, nil
 }
 
+func (dsp *MapleDb) scanJobStatusEntry(rows *sql.Rows) (*JobStatusEntry, error) {
+	var entry JobStatusEntry
+	var date string
+	err := rows.Scan(&entry.primaryKey, &entry.jobId, &entry.status, &date)
+	if err != nil {
+		return nil, err
+	}
+	entry.date, err = time.Parse("2006-01-02 15:04:05.999", date)
+	if err != nil {
+		return nil, err
+	}
+	return &entry, nil
+}
+
 func (dsp *MapleDb) loadJobStatusEntries(jobPrimaryKey int64, log *Logger) ([]*JobStatusEntry, error) {
-	var query = `SELECT id, status, date FROM job_status WHERE job_id=?`
+	var entries []*JobStatusEntry
+	var query = `SELECT id, job_id, status, date FROM job_status WHERE job_id=?`
 	log.DbQuery(query, strconv.FormatInt(jobPrimaryKey, 10))
 	rows, err := dsp.db.Query(query, jobPrimaryKey)
 	if err != nil {
 		return nil, err
 	}
-
-	var entries []*JobStatusEntry
 	for rows.Next() {
-		var entry JobStatusEntry
-		var date string
-
-		err = rows.Scan(&entry.primaryKey, &entry.status, &date)
-
+		entry, err := dsp.scanJobStatusEntry(rows)
 		if err != nil {
 			return nil, err
 		}
-
-		entry.date, err = time.Parse("2006-01-02 15:04:05.999", date)
-
-		if err != nil {
-			return nil, err
-		}
-
-		entries = append(entries, &entry)
+		entries = append(entries, entry)
 	}
 	return entries, nil
 }
