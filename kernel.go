@@ -105,7 +105,6 @@ type WorkflowInstance struct {
 	backend      Backend
 	db           *MapleDb
 	log          *Logger
-	start        time.Time // TODO: eventually move this to the entry (and DB)
 	_graph       *Graph
 }
 
@@ -185,11 +184,10 @@ func (wi *WorkflowInstance) setWorkflowCompleted(status string, workflowDone cha
 	}()
 }
 
-func (wi *WorkflowInstance) initJobs(workflowDone chan<- string, ctx context.Context) {
+func (wi *WorkflowInstance) initJobs(workflowDone chan<- string, ctx context.Context) error {
 	// If workflow has not been started yet, launch the root nodes
 	if len(wi.entry.jobs) == 0 {
-		wi.persistAndLaunch(wi.Graph().Root(), ctx)
-		return
+		return wi.persistAndLaunch(wi.Graph().Root(), ctx)
 	}
 
 	terminalStatus := wi.isTerminal()
@@ -210,7 +208,7 @@ func (wi *WorkflowInstance) initJobs(workflowDone chan<- string, ctx context.Con
 		case "Done":
 			node := wi.Graph().Find(jobEntry.fqn)
 			if node == nil {
-				panic("cannot find node") // TODO
+				return errors.New(fmt.Sprintf("cannot find node: %s", jobEntry.fqn))
 			}
 
 			nodes := wi.Graph().Downstream(node)
@@ -222,7 +220,7 @@ func (wi *WorkflowInstance) initJobs(workflowDone chan<- string, ctx context.Con
 			}
 		}
 	}
-	wi.persistAndLaunch(newNodes, ctx)
+	return wi.persistAndLaunch(newNodes, ctx)
 }
 
 func (wi *WorkflowInstance) launch(job *JobInstance, pctx context.Context) {
@@ -291,10 +289,10 @@ func (wi *WorkflowInstance) doneJobsHandler(workflowDone chan<- string, ctx cont
 func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Context, abortCtx context.Context, wg *sync.WaitGroup) {
 	var log = wi.log.ForWorkflow(wi.Uuid())
 
-	wi.start = time.Now()
+	start := time.Now()
 	log.Info("run: enter")
 	defer func() {
-		log.Info("run: exit (runtime %s)", time.Since(wi.start))
+		log.Info("run: exit (runtime %s)", time.Since(start))
 	}()
 
 	wi.setStatus("Started")
@@ -325,7 +323,12 @@ func (wi *WorkflowInstance) run(done chan<- *WorkflowInstance, ctx context.Conte
 	}
 
 	subCtx, _ := context.WithCancel(ctx)
-	wi.initJobs(workflowDone, ctx)
+	err := wi.initJobs(workflowDone, ctx)
+	if err != nil {
+		log.Info("Could not initialize jobs: %s", err)
+		wi.setStatus("Failed")
+		return
+	}
 	go wi.doneJobsHandler(workflowDone, subCtx)
 
 	for {
@@ -410,13 +413,15 @@ func (kernel *Kernel) run(ctx context.Context) {
 
 	resumableEntries, err := kernel.db.LoadWorkflowsByStatus(log, "Started", "NotStarted")
 	if err != nil {
-		panic(err) // TODO: don't panic
+		log.Info("Could not load resumable jobs: %s", err)
+		return
 	}
 	for _, entry := range resumableEntries {
 		log.Info("kernel: resume workflow %s", entry.uuid)
 		wi, err := kernel.newWorkflowInstanceFromEntry(entry)
 		if err != nil {
-			panic(err) // TODO: don't panic
+			log.Info("Could not create new workflow instance: %s", err)
+			return
 		}
 		go kernel.enqueue(wi, time.Minute)
 	}
@@ -429,7 +434,6 @@ func (kernel *Kernel) run(ctx context.Context) {
 	}
 
 	for {
-		// TODO: need mutex around kernel.on
 		if kernel.on == false {
 			if len(kernel.running) == 0 {
 				return
@@ -580,11 +584,11 @@ func (kernel *Kernel) On() {
 	defer kernel.mutex.Unlock()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	kernel.on = true
 	kernel.cancel = cancel
 	kernel.waitGroup.Add(1)
 	kernel.db = NewMapleDb(kernel.dbName, kernel.dbConnection, kernel.log)
 	go kernel.run(ctx)
+	kernel.on = true
 }
 
 func (kernel *Kernel) Off() {
