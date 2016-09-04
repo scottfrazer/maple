@@ -545,6 +545,8 @@ func NewKernel(log *Logger, dbName string, dbConnection string, concurrentWorkfl
 	var mutex sync.Mutex
 	var backendsMutex sync.Mutex
 	// TODO: move DB creation into On()?  Semantics should be: zero DB connections on Off()
+	// To test, create a file not writeable by current user and try to use it for dbConnection
+	// Where does it fail?  Here or on On()?  Should probably fail on On()
 	db := NewMapleDb(dbName, dbConnection, log)
 	kernel := Kernel{
 		log:                  log,

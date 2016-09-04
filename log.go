@@ -56,8 +56,19 @@ func (log *Logger) Info(format string, args ...interface{}) {
 	fmt.Fprintf(log.writer, now+" "+log.prefix+fmt.Sprintf(format, args...)+"\n")
 }
 
-func (log *Logger) DbQuery(query string, args ...string) {
+func (log *Logger) DbQuery(query string, args ...interface{}) {
 	if log.logQueries {
-		log.Info("[QUERY] %s [ARGS] "+strings.Join(args, ", "), query)
+		argsString := make([]string, len(args))
+		for index, arg := range args {
+			var str string
+			switch v := arg.(type) {
+			case int64:
+				str = fmt.Sprintf("%d", v)
+			default:
+				str = fmt.Sprintf("%s", v)
+			}
+			argsString[index] = str
+		}
+		log.Info("[QUERY] %s [ARGS] "+strings.Join(argsString, ", "), query)
 	}
 }

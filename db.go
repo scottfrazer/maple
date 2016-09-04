@@ -3,6 +3,7 @@ package maple
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/satori/go.uuid"
 	"strconv"
@@ -46,12 +47,14 @@ func (we *WorkflowEntry) LatestStatusEntry() *WorkflowStatusEntry {
 
 type WorkflowStatusEntry struct {
 	primaryKey int64
+	workflowId int64
 	status     string
 	date       time.Time
 }
 
 type WorkflowSourcesEntry struct {
 	primaryKey int64
+	workflowId int64
 	wdl        string
 	inputs     string
 	options    string
@@ -59,10 +62,15 @@ type WorkflowSourcesEntry struct {
 
 type JobEntry struct {
 	primaryKey    int64
+	workflowId    int64
 	fqn           string
 	shard         int
 	attempt       int
 	statusEntries []*JobStatusEntry
+}
+
+func (je *JobEntry) Tag() string {
+	return fmt.Sprintf("%s:%d:%d", je.fqn, je.shard, je.attempt)
 }
 
 func (je *JobEntry) LatestStatusEntry() *JobStatusEntry {
@@ -80,6 +88,7 @@ func (je *JobEntry) LatestStatusEntry() *JobStatusEntry {
 
 type JobStatusEntry struct {
 	primaryKey int64
+	jobId      int64
 	status     string
 	date       time.Time
 }
@@ -422,11 +431,11 @@ func (dsp *MapleDb) LoadWorkflow(uuid uuid.UUID, log *Logger) (*WorkflowEntry, e
 		return nil, err
 	}
 
-	entry, err := dsp.loadWorkflowEntry(log, primaryKey)
+	entries, err := dsp.loadWorkflowsByPrimaryKey(log, primaryKey)
 	if err != nil {
 		return nil, err
 	}
-	return entry, nil
+	return entries[0], nil
 }
 
 func (dsp *MapleDb) NewWorkflowStatusEntry(primaryKey int64, status string, date time.Time, log *Logger) (*WorkflowStatusEntry, error) {
@@ -439,40 +448,62 @@ func (dsp *MapleDb) NewWorkflowStatusEntry(primaryKey int64, status string, date
 	return statusEntry, nil
 }
 
+func qmarks(len int) string {
+	var questionMarks = make([]string, len)
+	for i := 0; i < len; i++ {
+		questionMarks[i] = "?"
+	}
+	return strings.Join(questionMarks, ", ")
+}
+
+func intsToInterface(ids ...int64) []interface{} {
+	queryParams := make([]interface{}, len(ids))
+	for i := range ids {
+		queryParams[i] = ids[i]
+	}
+	return queryParams
+}
+
+func stringsToInterface(strs ...string) []interface{} {
+	queryParams := make([]interface{}, len(strs))
+	for i := range strs {
+		queryParams[i] = strs[i]
+	}
+	return queryParams
+}
+
+func batchQuery(ids []interface{}, batchSize int) [][]interface{} {
+	var intervals [][]interface{}
+	for i := 0; i*batchSize < len(ids); i++ {
+		var start = i * batchSize
+		var end = start + batchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		intervals = append(intervals, ids[start:end])
+	}
+	return intervals
+}
+
 func (dsp *MapleDb) LoadWorkflowsByStatus(log *Logger, status ...string) ([]*WorkflowEntry, error) {
 	dsp.mtx.Lock()
 	defer dsp.mtx.Unlock()
 	db := dsp.db
-	questionMarks := make([]string, len(status))
-	for i := 0; i < len(status); i++ {
-		questionMarks[i] = "?"
-	}
-	var query = `SELECT workflow_id FROM (SELECT workflow_id, status, MAX(date, id) FROM workflow_status GROUP BY workflow_id) WHERE status IN (` + strings.Join(questionMarks, ", ") + `);`
-	log.DbQuery(query, status...)
+	var query = `SELECT workflow_id FROM (SELECT workflow_id, status, MAX(date, id) FROM workflow_status GROUP BY workflow_id) WHERE status IN (` + qmarks(len(status)) + `);`
 
-	queryParams := make([]interface{}, len(status))
-	for i := range status {
-		queryParams[i] = status[i]
-	}
-
-	rows, err := db.Query(query, queryParams...)
+	var x = stringsToInterface(status...)
+	log.DbQuery(query, x...)
+	rows, err := db.Query(query, x...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var entries []*WorkflowEntry
+	var workflowIds []int64
+	var id int64
 	for rows.Next() {
-		var id int64
 		err = rows.Scan(&id)
-		if err != nil {
-			return nil, err
-		}
-		entry, err := dsp.loadWorkflowEntry(log, id)
-		if err != nil {
-			return nil, err
-		}
-		entries = append(entries, entry)
+		workflowIds = append(workflowIds, id)
 	}
 
 	err = rows.Err()
@@ -480,7 +511,181 @@ func (dsp *MapleDb) LoadWorkflowsByStatus(log *Logger, status ...string) ([]*Wor
 		return nil, err
 	}
 
-	return entries, nil
+	return dsp.loadWorkflowsByPrimaryKey(log, workflowIds...)
+}
+
+func (dsp *MapleDb) loadWorkflowsByPrimaryKey(log *Logger, ids ...int64) ([]*WorkflowEntry, error) {
+	db := dsp.db
+
+	if len(ids) == 0 {
+		return make([]*WorkflowEntry, 0), nil
+	}
+
+	var workflowEntries []*WorkflowEntry
+	var jobEntries []*JobEntry
+	var jobStatusEntries = make(map[int64][]*JobStatusEntry)
+	var workflowStatusEntries []*WorkflowStatusEntry
+	var workflowSourcesEntries []*WorkflowSourcesEntry
+	var x = intsToInterface(ids...)
+
+	for _, interval := range batchQuery(x, 500) {
+		var query = `SELECT id, uuid, backend FROM workflow where id in (` + qmarks(len(interval)) + `) ORDER BY id;`
+		log.DbQuery(query, interval...)
+		rows, err := db.Query(query, interval...)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var entry WorkflowEntry
+			err = rows.Scan(&entry.primaryKey, &entry.uuid, &entry.backend)
+			if err != nil {
+				return nil, err
+			}
+			workflowEntries = append(workflowEntries, &entry)
+		}
+
+		err = rows.Err()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	for _, interval := range batchQuery(x, 500) {
+		var query = `SELECT id, workflow_id, call_fqn, shard, attempt FROM job WHERE workflow_id IN (` + qmarks(len(interval)) + ` ) ORDER BY workflow_id;`
+		log.DbQuery(query, interval...)
+		rows, err := db.Query(query, interval...)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var entry JobEntry
+			err = rows.Scan(&entry.primaryKey, &entry.workflowId, &entry.fqn, &entry.shard, &entry.attempt)
+			if err != nil {
+				return nil, err
+			}
+			jobEntries = append(jobEntries, &entry)
+		}
+
+		err = rows.Err()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	for _, interval := range batchQuery(x, 500) {
+		var query = `SELECT id, workflow_id, status, date FROM workflow_status WHERE workflow_id in (` + qmarks(len(interval)) + `) ORDER BY workflow_id;`
+		log.DbQuery(query, interval...)
+		rows, err := db.Query(query, interval...)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var entry WorkflowStatusEntry
+			var date string
+			err = rows.Scan(&entry.primaryKey, &entry.workflowId, &entry.status, &date)
+			if err != nil {
+				return nil, err
+			}
+			entry.date, err = time.Parse("2006-01-02 15:04:05.999", date)
+			if err != nil {
+				return nil, err
+			}
+			workflowStatusEntries = append(workflowStatusEntries, &entry)
+		}
+
+		err = rows.Err()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	for _, interval := range batchQuery(x, 500) {
+		var query = `SELECT id, workflow_id, wdl, inputs, options FROM workflow_sources WHERE workflow_id in (` + qmarks(len(interval)) + `) ORDER BY workflow_id;`
+		log.DbQuery(query, interval...)
+		rows, err := db.Query(query, interval...)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var entry WorkflowSourcesEntry
+			err = rows.Scan(&entry.primaryKey, &entry.workflowId, &entry.wdl, &entry.inputs, &entry.options)
+			if err != nil {
+				return nil, err
+			}
+			workflowSourcesEntries = append(workflowSourcesEntries, &entry)
+		}
+
+		err = rows.Err()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	jobIds := make([]interface{}, len(jobEntries))
+	for index, entry := range jobEntries {
+		jobIds[index] = entry.primaryKey
+	}
+
+	for _, interval := range batchQuery(jobIds, 500) {
+		var query = `SELECT id, job_id, status, date FROM job_status WHERE job_id in (` + qmarks(len(interval)) + `) ORDER BY job_id;`
+		log.DbQuery(query, interval...)
+		rows, err := db.Query(query, interval...)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var entry JobStatusEntry
+			var date string
+			err = rows.Scan(&entry.primaryKey, &entry.jobId, &entry.status, &date)
+			if err != nil {
+				return nil, err
+			}
+			entry.date, err = time.Parse("2006-01-02 15:04:05.999", date)
+			if err != nil {
+				return nil, err
+			}
+			jobStatusEntries[entry.jobId] = append(jobStatusEntries[entry.jobId], &entry)
+		}
+
+		err = rows.Err()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	for _, jobEntry := range jobEntries {
+		jobEntry.statusEntries = jobStatusEntries[jobEntry.primaryKey]
+	}
+
+	for _, workflowEntry := range workflowEntries {
+		for _, jobEntry := range jobEntries {
+			if jobEntry.workflowId == workflowEntry.primaryKey {
+				workflowEntry.jobs = append(workflowEntry.jobs, jobEntry)
+			}
+		}
+		for _, workflowStatusEntry := range workflowStatusEntries {
+			if workflowStatusEntry.workflowId == workflowEntry.primaryKey {
+				workflowEntry.statusEntries = append(workflowEntry.statusEntries, workflowStatusEntry)
+			}
+		}
+		for _, workflowSourcesEntry := range workflowSourcesEntries {
+			if workflowSourcesEntry.workflowId == workflowEntry.primaryKey {
+				workflowEntry.sources = workflowSourcesEntry
+			}
+		}
+	}
+
+	return workflowEntries, nil
 }
 
 func (dsp *MapleDb) LoadJobEntry(log *Logger, workflowId int64, fqn string, shard, attempt int) (*JobEntry, error) {
@@ -537,114 +742,6 @@ func (dsp *MapleDb) loadJobStatusEntries(jobPrimaryKey int64, log *Logger) ([]*J
 
 		entries = append(entries, &entry)
 	}
-	return entries, nil
-}
-
-func (dsp *MapleDb) loadWorkflowStatusEntries(workflowPrimaryKey int64, log *Logger) ([]*WorkflowStatusEntry, error) {
-	var query = `SELECT id, status, date FROM workflow_status WHERE workflow_id=?`
-	log.DbQuery(query, strconv.FormatInt(workflowPrimaryKey, 10))
-	rows, err := dsp.db.Query(query, workflowPrimaryKey)
-	if err != nil {
-		return nil, err
-	}
-
-	var entries []*WorkflowStatusEntry
-	for rows.Next() {
-		var entry WorkflowStatusEntry
-		var date string
-
-		err = rows.Scan(&entry.primaryKey, &entry.status, &date)
-
-		if err != nil {
-			return nil, err
-		}
-
-		entry.date, err = time.Parse("2006-01-02 15:04:05.999", date)
-
-		if err != nil {
-			return nil, err
-		}
-
-		entries = append(entries, &entry)
-	}
-	return entries, nil
-}
-
-func (dsp *MapleDb) loadWorkflowEntry(log *Logger, primaryKey int64) (*WorkflowEntry, error) {
-	var entry WorkflowEntry
-	entry.primaryKey = primaryKey
-
-	query := `SELECT uuid, backend FROM workflow WHERE id=?`
-	log.DbQuery(query, strconv.FormatInt(primaryKey, 10))
-	row := dsp.db.QueryRow(query, primaryKey)
-	err := row.Scan(&entry.uuid, &entry.backend)
-	if err != nil {
-		return nil, err
-	}
-
-	sources, err := dsp.loadWorkflowSourcesEntry(log, primaryKey)
-	if err != nil {
-		return nil, err
-	}
-	entry.sources = sources
-
-	statusEntries, err := dsp.loadWorkflowStatusEntries(primaryKey, log)
-	if err != nil {
-		return nil, err
-	}
-	entry.statusEntries = statusEntries
-
-	jobs, err := dsp.loadJobEntries(log, primaryKey)
-	if err != nil {
-		return nil, err
-	}
-	entry.jobs = jobs
-
-	return &entry, nil
-}
-
-func (dsp *MapleDb) loadWorkflowSourcesEntry(log *Logger, workflowPrimaryKey int64) (*WorkflowSourcesEntry, error) {
-	var entry WorkflowSourcesEntry
-
-	query := `SELECT wdl, inputs, options FROM workflow_sources WHERE workflow_id=?`
-	log.DbQuery(query, strconv.FormatInt(workflowPrimaryKey, 10))
-	row := dsp.db.QueryRow(query, workflowPrimaryKey)
-	err := row.Scan(&entry.wdl, &entry.inputs, &entry.options)
-	if err != nil {
-		return nil, err
-	}
-
-	return &entry, nil
-}
-
-func (dsp *MapleDb) loadJobEntries(log *Logger, workflowPrimaryKey int64) ([]*JobEntry, error) {
-	query := `SELECT id, call_fqn, shard, attempt FROM job WHERE workflow_id=?`
-	log.DbQuery(query, strconv.FormatInt(workflowPrimaryKey, 10))
-	rows, err := dsp.db.Query(query, workflowPrimaryKey)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var entries []*JobEntry
-	for rows.Next() {
-		var entry JobEntry
-
-		err = rows.Scan(&entry.primaryKey, &entry.fqn, &entry.shard, &entry.attempt)
-		if err != nil {
-			return nil, err
-		}
-
-		statusEntries, err := dsp.loadJobStatusEntries(entry.primaryKey, log)
-		if err != nil {
-			return nil, err
-		}
-
-		entry.statusEntries = statusEntries
-
-		entries = append(entries, &entry)
-	}
-
 	return entries, nil
 }
 
