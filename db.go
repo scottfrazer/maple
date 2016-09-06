@@ -98,19 +98,19 @@ func NewMapleDb(driverName, dataSourceName string, log *Logger) *MapleDb {
 		panic(err)
 	}
 	var mtx sync.Mutex
-	dsp := &MapleDb{driverName, dataSourceName, log, db, &mtx}
-	dsp.setup()
-	return dsp
+	mdb := &MapleDb{driverName, dataSourceName, log, db, &mtx}
+	mdb.setup()
+	return mdb
 }
 
-func (dsp *MapleDb) Close() {
-	dsp.db.Close()
+func (mdb *MapleDb) Close() {
+	mdb.db.Close()
 }
 
-func (dsp *MapleDb) tables() ([]string, error) {
+func (mdb *MapleDb) tables() ([]string, error) {
 	query := "SELECT name FROM sqlite_master WHERE type='table';"
-	dsp.log.DbQuery(query)
-	rows, err := dsp.db.Query(query)
+	mdb.log.DbQuery(query)
+	rows, err := mdb.db.Query(query)
 	if err != nil {
 		return nil, err
 	}
@@ -134,22 +134,22 @@ func (dsp *MapleDb) tables() ([]string, error) {
 	return tables, nil
 }
 
-func (dsp *MapleDb) query(query string) {
-	dsp.log.DbQuery(query)
-	_, err := dsp.db.Exec(query)
+func (mdb *MapleDb) query(query string) {
+	mdb.log.DbQuery(query)
+	_, err := mdb.db.Exec(query)
 	if err != nil {
 		panic(err)
 	}
 }
 
-func (dsp *MapleDb) setup() {
-	tableNames, err := dsp.tables()
+func (mdb *MapleDb) setup() {
+	tableNames, err := mdb.tables()
 	if err != nil {
 		panic(err)
 	}
 
 	if !contains("workflow", tableNames) {
-		dsp.query(`CREATE TABLE workflow (
+		mdb.query(`CREATE TABLE workflow (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			uuid TEXT,
 			backend TEXT
@@ -157,7 +157,7 @@ func (dsp *MapleDb) setup() {
 	}
 
 	if !contains("workflow_status", tableNames) {
-		dsp.query(`CREATE TABLE workflow_status (
+		mdb.query(`CREATE TABLE workflow_status (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			workflow_id INTEGER NOT NULL,
 			status TEXT,
@@ -167,7 +167,7 @@ func (dsp *MapleDb) setup() {
 	}
 
 	if !contains("job", tableNames) {
-		dsp.query(`CREATE TABLE job (
+		mdb.query(`CREATE TABLE job (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			workflow_id INTEGER NOT NULL,
 			call_fqn TEXT,
@@ -178,7 +178,7 @@ func (dsp *MapleDb) setup() {
 	}
 
 	if !contains("job_status", tableNames) {
-		dsp.query(`CREATE TABLE job_status (
+		mdb.query(`CREATE TABLE job_status (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			job_id INTEGER NOT NULL,
 			status TEXT,
@@ -188,7 +188,7 @@ func (dsp *MapleDb) setup() {
 	}
 
 	if !contains("workflow_sources", tableNames) {
-		dsp.query(`CREATE TABLE workflow_sources (
+		mdb.query(`CREATE TABLE workflow_sources (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			workflow_id INTEGER NOT NULL,
 			wdl TEXT,
@@ -199,10 +199,10 @@ func (dsp *MapleDb) setup() {
 	}
 }
 
-func (dsp *MapleDb) NewJobEntry(workflowPrimaryKey int64, fqn string, shard, attempt int, log *Logger) (*JobEntry, error) {
-	dsp.mtx.Lock()
-	defer dsp.mtx.Unlock()
-	db := dsp.db
+func (mdb *MapleDb) NewJobEntry(workflowPrimaryKey int64, fqn string, shard, attempt int, log *Logger) (*JobEntry, error) {
+	mdb.mtx.Lock()
+	defer mdb.mtx.Unlock()
+	db := mdb.db
 	var success = false
 	var primaryKey int64 = -1
 
@@ -243,7 +243,7 @@ func (dsp *MapleDb) NewJobEntry(workflowPrimaryKey int64, fqn string, shard, att
 		return nil, errors.New("could not insert into 'job' table")
 	}
 
-	statusEntry, err := dsp.newJobStatusEntry(primaryKey, "NotStarted", time.Now(), log, tx.Exec)
+	statusEntry, err := mdb.newJobStatusEntry(primaryKey, "NotStarted", time.Now(), log, tx.Exec)
 	if err != nil {
 		return nil, err
 	}
@@ -260,13 +260,13 @@ func (dsp *MapleDb) NewJobEntry(workflowPrimaryKey int64, fqn string, shard, att
 	return &entry, nil
 }
 
-func (dsp *MapleDb) NewJobStatusEntry(jobPrimaryKey int64, status string, date time.Time, log *Logger) (*JobStatusEntry, error) {
-	dsp.mtx.Lock()
-	defer dsp.mtx.Unlock()
-	return dsp.newJobStatusEntry(jobPrimaryKey, status, date, log, dsp.db.Exec)
+func (mdb *MapleDb) NewJobStatusEntry(jobPrimaryKey int64, status string, date time.Time, log *Logger) (*JobStatusEntry, error) {
+	mdb.mtx.Lock()
+	defer mdb.mtx.Unlock()
+	return mdb.newJobStatusEntry(jobPrimaryKey, status, date, log, mdb.db.Exec)
 }
 
-func (dsp *MapleDb) newJobStatusEntry(jobPrimaryKey int64, status string, date time.Time, log *Logger, exec dbExecFunc) (*JobStatusEntry, error) {
+func (mdb *MapleDb) newJobStatusEntry(jobPrimaryKey int64, status string, date time.Time, log *Logger, exec dbExecFunc) (*JobStatusEntry, error) {
 	date8601 := date.Format("2006-01-02 15:04:05.999")
 	query := `INSERT INTO job_status (job_id, status, date) VALUES (?, ?, ?)`
 	log.DbQuery(query, jobPrimaryKey, status, date8601)
@@ -296,10 +296,10 @@ func (dsp *MapleDb) newJobStatusEntry(jobPrimaryKey int64, status string, date t
 	return &entry, nil
 }
 
-func (dsp *MapleDb) NewWorkflowEntry(uuid uuid.UUID, wdl, inputs, options, backend string, log *Logger) (*WorkflowEntry, error) {
-	dsp.mtx.Lock()
-	defer dsp.mtx.Unlock()
-	db := dsp.db
+func (mdb *MapleDb) NewWorkflowEntry(uuid uuid.UUID, wdl, inputs, options, backend string, log *Logger) (*WorkflowEntry, error) {
+	mdb.mtx.Lock()
+	defer mdb.mtx.Unlock()
+	db := mdb.db
 	var success = false
 	var primaryKey int64 = -1
 
@@ -340,12 +340,12 @@ func (dsp *MapleDb) NewWorkflowEntry(uuid uuid.UUID, wdl, inputs, options, backe
 		return nil, errors.New("could not insert into 'workflow' table")
 	}
 
-	sources, err := dsp.newWorkflowSourcesEntry(primaryKey, wdl, inputs, options, log, tx.Exec)
+	sources, err := mdb.newWorkflowSourcesEntry(primaryKey, wdl, inputs, options, log, tx.Exec)
 	if err != nil {
 		return nil, err
 	}
 
-	statusEntry, err := dsp.newWorkflowStatusEntry(primaryKey, "NotStarted", time.Now(), log, tx.Exec)
+	statusEntry, err := mdb.newWorkflowStatusEntry(primaryKey, "NotStarted", time.Now(), log, tx.Exec)
 	if err != nil {
 		return nil, err
 	}
@@ -362,7 +362,7 @@ func (dsp *MapleDb) NewWorkflowEntry(uuid uuid.UUID, wdl, inputs, options, backe
 	return &entry, nil
 }
 
-func (dsp *MapleDb) newWorkflowSourcesEntry(workflowPrimaryKey int64, wdl, inputs, options string, log *Logger, exec dbExecFunc) (*WorkflowSourcesEntry, error) {
+func (mdb *MapleDb) newWorkflowSourcesEntry(workflowPrimaryKey int64, wdl, inputs, options string, log *Logger, exec dbExecFunc) (*WorkflowSourcesEntry, error) {
 	query := `INSERT INTO workflow_sources (workflow_id, wdl, inputs, options) VALUES (?, ?, ?, ?)`
 	log.DbQuery(query, workflowPrimaryKey, "{omit}", "{omit}", "{omit}")
 	res, err := exec(query, workflowPrimaryKey, wdl, inputs, options)
@@ -386,7 +386,7 @@ func (dsp *MapleDb) newWorkflowSourcesEntry(workflowPrimaryKey int64, wdl, input
 	return &entry, nil
 }
 
-func (dsp *MapleDb) newWorkflowStatusEntry(workflowPrimaryKey int64, status string, date time.Time, log *Logger, exec dbExecFunc) (*WorkflowStatusEntry, error) {
+func (mdb *MapleDb) newWorkflowStatusEntry(workflowPrimaryKey int64, status string, date time.Time, log *Logger, exec dbExecFunc) (*WorkflowStatusEntry, error) {
 	date8601 := date.Format("2006-01-02 15:04:05.999")
 	query := `INSERT INTO workflow_status (workflow_id, status, date) VALUES (?, ?, ?)`
 	log.DbQuery(query, workflowPrimaryKey, status, date8601)
@@ -416,30 +416,30 @@ func (dsp *MapleDb) newWorkflowStatusEntry(workflowPrimaryKey int64, status stri
 	return &entry, nil
 }
 
-func (dsp *MapleDb) LoadWorkflow(uuid uuid.UUID, log *Logger) (*WorkflowEntry, error) {
-	dsp.mtx.Lock()
-	defer dsp.mtx.Unlock()
+func (mdb *MapleDb) LoadWorkflow(uuid uuid.UUID, log *Logger) (*WorkflowEntry, error) {
+	mdb.mtx.Lock()
+	defer mdb.mtx.Unlock()
 	var primaryKey int64
 
 	query := `SELECT id FROM workflow WHERE uuid=?`
 	log.DbQuery(query, uuid.String())
-	row := dsp.db.QueryRow(query, uuid)
+	row := mdb.db.QueryRow(query, uuid)
 	err := row.Scan(&primaryKey)
 	if err != nil {
 		return nil, err
 	}
 
-	entries, err := dsp.loadWorkflowsByPrimaryKey(log, primaryKey)
+	entries, err := mdb.loadWorkflowsByPrimaryKey(log, primaryKey)
 	if err != nil {
 		return nil, err
 	}
 	return entries[0], nil
 }
 
-func (dsp *MapleDb) NewWorkflowStatusEntry(primaryKey int64, status string, date time.Time, log *Logger) (*WorkflowStatusEntry, error) {
-	dsp.mtx.Lock()
-	defer dsp.mtx.Unlock()
-	statusEntry, err := dsp.newWorkflowStatusEntry(primaryKey, status, time.Now(), log, dsp.db.Exec)
+func (mdb *MapleDb) NewWorkflowStatusEntry(primaryKey int64, status string, date time.Time, log *Logger) (*WorkflowStatusEntry, error) {
+	mdb.mtx.Lock()
+	defer mdb.mtx.Unlock()
+	statusEntry, err := mdb.newWorkflowStatusEntry(primaryKey, status, time.Now(), log, mdb.db.Exec)
 	if err != nil {
 		return nil, err
 	}
@@ -483,10 +483,10 @@ func batchQuery(ids []interface{}, batchSize int) [][]interface{} {
 	return intervals
 }
 
-func (dsp *MapleDb) LoadWorkflowsByStatus(log *Logger, status ...string) ([]*WorkflowEntry, error) {
-	dsp.mtx.Lock()
-	defer dsp.mtx.Unlock()
-	db := dsp.db
+func (mdb *MapleDb) LoadWorkflowsByStatus(log *Logger, status ...string) ([]*WorkflowEntry, error) {
+	mdb.mtx.Lock()
+	defer mdb.mtx.Unlock()
+	db := mdb.db
 	var query = `SELECT workflow_id FROM (SELECT workflow_id, status, MAX(date, id) FROM workflow_status GROUP BY workflow_id) WHERE status IN (` + qmarks(len(status)) + `);`
 
 	var x = stringsToInterface(status...)
@@ -509,11 +509,11 @@ func (dsp *MapleDb) LoadWorkflowsByStatus(log *Logger, status ...string) ([]*Wor
 		return nil, err
 	}
 
-	return dsp.loadWorkflowsByPrimaryKey(log, workflowIds...)
+	return mdb.loadWorkflowsByPrimaryKey(log, workflowIds...)
 }
 
-func (dsp *MapleDb) loadWorkflowsByPrimaryKey(log *Logger, ids ...int64) ([]*WorkflowEntry, error) {
-	db := dsp.db
+func (mdb *MapleDb) loadWorkflowsByPrimaryKey(log *Logger, ids ...int64) ([]*WorkflowEntry, error) {
+	db := mdb.db
 
 	if len(ids) == 0 {
 		return make([]*WorkflowEntry, 0), nil
@@ -642,7 +642,7 @@ func (dsp *MapleDb) loadWorkflowsByPrimaryKey(log *Logger, ids ...int64) ([]*Wor
 		defer rows.Close()
 
 		for rows.Next() {
-			entry, err := dsp.scanJobStatusEntry(rows)
+			entry, err := mdb.scanJobStatusEntry(rows)
 			if err != nil {
 				return nil, err
 			}
@@ -680,13 +680,13 @@ func (dsp *MapleDb) loadWorkflowsByPrimaryKey(log *Logger, ids ...int64) ([]*Wor
 	return workflowEntries, nil
 }
 
-func (dsp *MapleDb) LoadJobEntry(log *Logger, workflowId int64, fqn string, shard, attempt int) (*JobEntry, error) {
-	dsp.mtx.Lock()
-	defer dsp.mtx.Unlock()
+func (mdb *MapleDb) LoadJobEntry(log *Logger, workflowId int64, fqn string, shard, attempt int) (*JobEntry, error) {
+	mdb.mtx.Lock()
+	defer mdb.mtx.Unlock()
 
 	query := `SELECT id FROM job WHERE call_fqn=? AND shard=? AND attempt=? AND workflow_id=?`
 	log.DbQuery(query, fqn, shard, attempt, workflowId)
-	row := dsp.db.QueryRow(query, fqn, shard, attempt, workflowId)
+	row := mdb.db.QueryRow(query, fqn, shard, attempt, workflowId)
 
 	var entry JobEntry
 	entry.fqn = fqn
@@ -698,7 +698,7 @@ func (dsp *MapleDb) LoadJobEntry(log *Logger, workflowId int64, fqn string, shar
 		return nil, err
 	}
 
-	statusEntries, err := dsp.loadJobStatusEntries(entry.primaryKey, log)
+	statusEntries, err := mdb.loadJobStatusEntries(entry.primaryKey, log)
 	if err != nil {
 		return nil, err
 	}
@@ -707,7 +707,7 @@ func (dsp *MapleDb) LoadJobEntry(log *Logger, workflowId int64, fqn string, shar
 	return &entry, nil
 }
 
-func (dsp *MapleDb) scanJobStatusEntry(rows *sql.Rows) (*JobStatusEntry, error) {
+func (mdb *MapleDb) scanJobStatusEntry(rows *sql.Rows) (*JobStatusEntry, error) {
 	var entry JobStatusEntry
 	var date string
 	err := rows.Scan(&entry.primaryKey, &entry.jobId, &entry.status, &date)
@@ -721,16 +721,16 @@ func (dsp *MapleDb) scanJobStatusEntry(rows *sql.Rows) (*JobStatusEntry, error) 
 	return &entry, nil
 }
 
-func (dsp *MapleDb) loadJobStatusEntries(jobPrimaryKey int64, log *Logger) ([]*JobStatusEntry, error) {
+func (mdb *MapleDb) loadJobStatusEntries(jobPrimaryKey int64, log *Logger) ([]*JobStatusEntry, error) {
 	var entries []*JobStatusEntry
 	var query = `SELECT id, job_id, status, date FROM job_status WHERE job_id=?`
 	log.DbQuery(query, jobPrimaryKey)
-	rows, err := dsp.db.Query(query, jobPrimaryKey)
+	rows, err := mdb.db.Query(query, jobPrimaryKey)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
-		entry, err := dsp.scanJobStatusEntry(rows)
+		entry, err := mdb.scanJobStatusEntry(rows)
 		if err != nil {
 			return nil, err
 		}
