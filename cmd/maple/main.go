@@ -155,6 +155,7 @@ func main() {
 		logger.Info("")
 		logger.Info("Version: %s", Version)
 		logger.Info("Git Hash: %s", GitHash)
+		logger.Info("Date: %s", time.Now())
 		logger.Info("")
 		logger.Info("Listening on %s ...", *host)
 		http.ListenAndServe(*host, nil)
