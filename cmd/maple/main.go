@@ -147,6 +147,15 @@ func main() {
 		http.HandleFunc("/abort", maple.AbortHttpEndpoint(kernel))
 		http.HandleFunc("/list", maple.ListHttpEndpoint(kernel))
 
+		logger.Info(`   __  ___          __`)
+		logger.Info(`  /  |/  /__ ____  / /__`)
+		logger.Info(" / /|_/ / _ `/ _ \\/ / -_)")
+		logger.Info(`/_/  /_/\_,_/ .__/_/\__/`)
+		logger.Info(`           /_/`)
+		logger.Info("")
+		logger.Info("Version: %s", Version)
+		logger.Info("Git Hash: %s", GitHash)
+		logger.Info("")
 		logger.Info("Listening on %s ...", *host)
 		http.ListenAndServe(*host, nil)
 	}
