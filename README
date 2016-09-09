@@ -96,14 +96,6 @@ backend.Wait(h handle)
 backend.JobFile(job *JobInstance, relpath string) *WdlFile
 backend.File(abspath string) *WdlFile
 
-Filesystem
-==========
-
-NewUnixFs(path) *FileSystem
-NewGcsFs(path) *FileSystem
-
-fs.
-
 Command Line (cli.go)
 ============
 
@@ -132,17 +124,17 @@ $ maple run foo.wdl foo.inputs [--tags=tag]
 $ maple ls [--since=time|duration] [--status=running] [--tags=]
 UUID        WDL       Status      Start Date
 --------    -------   ---------   -------------------------
-cefd19cb    foo.wdl		running			2016-08-10T01:39:32+00:00
-93453875    bar.wdl		submitted		2016-08-10T01:39:32+00:00
-9ce50dbf    baz.wdl		completed		2016-08-10T01:39:32+00:00
+cefd19cb    foo.wdl   running     2016-08-10T01:39:32+00:00
+93453875    bar.wdl   submitted   2016-08-10T01:39:32+00:00
+9ce50dbf    baz.wdl   completed   2016-08-10T01:39:32+00:00
 (Sends GET /workflows?since=&status=&tags=)
 
 $ maple ls 93453875
 FQN           Status    Backend   Start Date
 ------------  --------  --------  -------------------------
-w.a 			    running		local 		2016-08-10T01:39:32+00:00
-w.b 			    running		local 		2016-08-10T01:39:32+00:00
-w.$scatter_0 	completed		 		    2016-08-10T01:39:32+00:00
+w.a           running   local     2016-08-10T01:39:32+00:00
+w.b           running   local     2016-08-10T01:39:32+00:00
+w.$scatter_0  completed           2016-08-10T01:39:32+00:00
 (Sends GET /jobs?w=93453875)
 
 $ maple ls 93453875 9ce50dbf
