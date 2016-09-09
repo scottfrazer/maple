@@ -1,7 +1,7 @@
 LD_FLAGS="-X main.Version=dev -X main.GitHash=`git rev-parse HEAD`"
 
 clean:
-	-rm -rf maple DB maple.log $(GOPATH)/bin/maple $(GOPATH)/pkg/darwin_amd64/github.com/scottfrazer/
+	-rm -rf maple maple.sqlite3.db maple.log $(GOPATH)/bin/maple $(GOPATH)/pkg/darwin_amd64/github.com/scottfrazer/
 deps:
 	go get github.com/mattn/go-sqlite3
 	go get github.com/satori/go.uuid

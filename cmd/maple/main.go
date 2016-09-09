@@ -27,7 +27,7 @@ func main() {
 		app          = kingpin.New("maple", "A workflow engine")
 		host         = app.Flag("host", "Host where Maple server is running").Default("localhost:8765").String()
 		dbDriver     = app.Flag("db-driver", "Database driver.  Only accepts 'sqlite3'").Default("sqlite3").String()
-		dbConnection = app.Flag("db", "Database connection string.  For sqlite, the file that will hold the database").Default("DB").String()
+		dbConnection = app.Flag("db", "Database connection string.  For sqlite, the file that will hold the database").Default("maple.sqlite3.db").String()
 		queueSize    = app.Flag("queue-size", "Submission queue size").Default("1000").Int()
 		concurrentWf = app.Flag("concurrent-workflows", "Number of workflows").Default("1000").Int()
 		logPath      = app.Flag("log", "Path to write logs").Default("maple.log").String()
