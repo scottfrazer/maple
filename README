@@ -105,24 +105,73 @@ $ maple submit foo.wdl foo.inputs
 cefd19cb-a8b1-474d-bf58-9c4522a5af98
 (Sends POST /submit)
 
-$ maple tail cefd19cb
+$ maple tail [-n 10] [-f] cefd19cb
 ... tailed log lines ...
-(Sends GET /fifo/cefd19cb)
+(Sends GET /tail/cefd19cb)
 
-$ maple run foo.wdl foo.inputs
+Should have behavior of UNIX tail:
+    1) by default, return last 10 lines
+        /tail/cefd19cb
+        /tail/
+    2) -n 1000 returns last 1000 lines and exit
+        /tail/cefd19cb?n=1000
+        /tail?n=1000
+    3) -f streams lines (-n compatible) will show last n-lines
+        /tail/cefd19cb?f=true
+        /tail?f=true&n=1000
+
+$ maple run foo.wdl foo.inputs [--tags=tag]
 (= submit + tail)
 
-$ maple ls
+$ maple ls [--since=time|duration] [--status=running] [--tags=]
+UUID        WDL       Status      Start Date
+--------    -------   ---------   -------------------------
 cefd19cb    foo.wdl		running			2016-08-10T01:39:32+00:00
 93453875    bar.wdl		submitted		2016-08-10T01:39:32+00:00
 9ce50dbf    baz.wdl		completed		2016-08-10T01:39:32+00:00
-(Sends GET /list)
+(Sends GET /workflows?since=&status=&tags=)
 
-$ maple show 93453875
-w.a 			running		local 		2016-08-10T01:39:32+00:00
-w.b 			running		local 		2016-08-10T01:39:32+00:00
-w.$scatter_0 	completed	-	 		2016-08-10T01:39:32+00:00
-(Sends GET /show/93453875)
+$ maple ls 93453875
+FQN           Status    Backend   Start Date
+------------  --------  --------  -------------------------
+w.a 			    running		local 		2016-08-10T01:39:32+00:00
+w.b 			    running		local 		2016-08-10T01:39:32+00:00
+w.$scatter_0 	completed		 		    2016-08-10T01:39:32+00:00
+(Sends GET /jobs?w=93453875)
+
+$ maple ls 93453875 9ce50dbf
+(Sends GET /jobs?w=93453875,9ce50dbf)
+...
+
+$ maple show 93453875:w.a
+Job 93453875:w.a
+Start:       2016-08-10T01:39:32+00:00
+End:
+Status:      running
+Backend:     local
+Output Path: /var/maple/jobs/93453875/w.a
+
+python <<CODE
+  ...
+CODE
+
+=== INPUTS
+
+File x = "/my/file.txt"
+Array[Int] i = [0,1,2,3]
+
+=== OUTPUTS
+
+File log = stdout()
+File result = "result.txt"
+Int i = read_int("some_number.txt")
+
+=== BACKEND
+
+Name:        local
+Pid:         65333
+Return Code:
+CPU Time:    1d4h27m
 
 $ maple abort cefd19cb
 (Sends POST /abort/cefd19cb)
@@ -133,11 +182,11 @@ $ maple ping
 $ maple server --port=8765
 
 HTTP API (http.go)
-========
+==================
 
 GET /ping
 POST /submit
-GET /fifo/:uuid
-GET /list
-GET /show/:uuid
-POST /abort/:uuid
+GET /tail/[:uuid]?n=10&f=false
+GET /list[?q=cefd19cb,93453875]
+GET /show/:uuid:fqn
+POST /abort/:uuid[:fqn]
