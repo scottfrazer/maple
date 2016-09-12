@@ -17,8 +17,9 @@ import (
 )
 
 var (
-	Version = "Unknown"
-	GitHash = "Unknown"
+	Version   = "Unknown"
+	GitHash   = "Unknown"
+	BuildDate = "Unknown"
 )
 
 func main() {
@@ -155,7 +156,13 @@ func main() {
 		logger.Info("")
 		logger.Info("Version: %s", Version)
 		logger.Info("Git Hash: %s", GitHash)
-		logger.Info("Date: %s", time.Now())
+		logger.Info("Build Date: %s", BuildDate)
+		logger.Info("")
+		logger.Info("Log File: %s", *logPath)
+		logger.Info("DB Driver: %s", *dbDriver)
+		logger.Info("DB Connection: %s", *dbConnection)
+		logger.Info("Concurrent Workflows: %d", *concurrentWf)
+		logger.Info("Submission Queue Size: %d", *queueSize)
 		logger.Info("")
 		logger.Info("Listening on %s ...", *host)
 		http.ListenAndServe(*host, nil)

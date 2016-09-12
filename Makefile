@@ -1,4 +1,4 @@
-LD_FLAGS="-X main.Version=dev -X main.GitHash=`git rev-parse HEAD`"
+LD_FLAGS="-X main.Version=dev -X main.GitHash=`git rev-parse HEAD` -X main.BuildDate=`date -u '+%Y-%m-%d_%H:%M:%S'`"
 
 clean:
 	-rm -rf maple maple.sqlite3.db maple.log $(GOPATH)/bin/maple $(GOPATH)/pkg/darwin_amd64/github.com/scottfrazer/
