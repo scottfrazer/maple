@@ -1,0 +1,29 @@
+WDL parser
+==========
+
+[DONE] 1) hermes go target all tests passing
+2) generate WDL parser, parse and print out pretty AST string
+3) Add parser.go to maple
+
+User Interface
+==============
+
+4) finish first draft design of CLI
+5) use http streaming for tailing logs
+
+WDL integration
+===============
+
+6) Implement enough of binding.go to run 3step.wdl
+7) Expand engine to run 3step.wdl
+
+Tests
+=====
+
+8) Use suite of WDL/inputs/options.  Use test-file-generation pattern to assert on
+    a) sorted workflow status changes
+    b) sorted job status changes
+    c) job output values
+9) Test the details of kernel.go, db.go
+
+NOTE: Tests must run on Linux and stock Mac OS X (no coreutils!!)
