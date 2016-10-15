@@ -6,6 +6,9 @@ deps:
 	go get github.com/mattn/go-sqlite3
 	go get github.com/satori/go.uuid
 	go get golang.org/x/net/context
+parser:
+	hermes generate grammar.hgr --language=go --go-package=maple --go-imports=strconv --name=wdl
+	go fmt wdl_parser.go
 test:
 	go test -v github.com/scottfrazer/maple
 install:

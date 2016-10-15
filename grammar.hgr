@@ -13,6 +13,7 @@ grammar {
       python: r'/\*(.*?)\*/' (DOTALL)
       c: r'/\*(.*?)\*/' (PCRE_DOTALL)
       java: r'/\*(.*?)\*/' (DOTALL)
+      go: r'(?s)/\*(.*?)\*/' (DOTALL)
       javascript: r'/\*(.*?)\*/' (m)
     } -> null
 
@@ -28,8 +29,8 @@ grammar {
     r'while(?!{%_identifier_follow%})' -> :while
     r'runtime(?!{%_identifier_follow%})' -> :runtime
     r'scatter(?!{%_identifier_follow%})' -> :scatter @scatter
-    r'command\s*(?=<<<)' -> :raw_command  @raw_command2
-    r'command\s*(?=\{)' -> :raw_command  @raw_command
+    r'command\s*<<<' -> :command :command_start @command_alt
+    r'command\s*\{' -> :command  :command_start @command
     r'parameter_meta(?!{%_identifier_follow%})' -> :parameter_meta
     r'meta(?!{%_identifier_follow%})' -> :meta
     r'(true|false)(?!{%_identifier_follow%})' -> :boolean
@@ -41,10 +42,12 @@ grammar {
     enum {
       python: r'"([^\\\"\n]|\\[\\"\'nrbtfav\?]|\\[0-7]{1,3}|\\x[0-9a-fA-F]+|\\[uU]([0-9a-fA-F]{4})([0-9a-fA-F]{4})?)*"'
       java: "\\\"(?>[^\\\\\\\"\\n]|\\\\[\\\"\\'nrbtfav\\\\?]|\\\\[0-7]{1,3}|\\\\x[0-9a-fA-F]+|\\\\[uU]([0-9a-fA-F]{4})([0-9a-fA-F]{4})?)*\\\""
+      go: "\\\"(?>[^\\\\\\\"\\n]|\\\\[\\\"\\'nrbtfav\\\\?]|\\\\[0-7]{1,3}|\\\\x[0-9a-fA-F]+|\\\\[uU]([0-9a-fA-F]{4})([0-9a-fA-F]{4})?)*\\\""
     } -> unescape(:string)
     enum {
       python: r'\'([^\\\'\n]|\\[\\"\'nrbtfav\?]|\\[0-7]{1,3}|\\x[0-9a-fA-F]+|\\[uU]([0-9a-fA-F]{4})([0-9a-fA-F]{4})?)*\''
       java: "'(?>[^\\\\\\'\\n]|\\\\[\\\"\\'nrbtfav\\\\?]|\\\\[0-7]{1,3}|\\\\x[0-9a-fA-F]+|\\\\[uU]([0-9a-fA-F]{4})([0-9a-fA-F]{4})?)*'"
+      go: "'(?>[^\\\\\\'\\n]|\\\\[\\\"\\'nrbtfav\\\\?]|\\\\[0-7]{1,3}|\\\\x[0-9a-fA-F]+|\\\\[uU]([0-9a-fA-F]{4})([0-9a-fA-F]{4})?)*'"
     } -> unescape(:string)
 
     r':' -> :colon
@@ -74,6 +77,7 @@ grammar {
     enum {
       python: r'\?'
       java: "\\?"
+      go: "\\?"
     } -> :qmark
     r'-?[0-9]+\.[0-9]+' -> :float
     r'[0-9]+' -> :integer
@@ -87,6 +91,7 @@ grammar {
       enum {
         python: r'{%_identifier%}(\.{%_identifier%})*'
         java: "{%_identifier%}(\\.{%_identifier%})*"
+        go: "{%_identifier%}(\\.{%_identifier%})*"
       } -> :fqn
     }
     mode<task_fqn> {
@@ -94,6 +99,7 @@ grammar {
       enum {
         python: r'{%_identifier%}(\.{%_identifier%})*'
         java: "{%_identifier%}(\\.{%_identifier%})*"
+        go: "{%_identifier%}(\\.{%_identifier%})*"
       } -> :fqn %pop
     }
     mode<scatter> {
@@ -106,25 +112,32 @@ grammar {
       r'in(?!{%_identifier_follow%})' -> :in
       r'{%_identifier%}' -> :identifier
     }
-    mode<raw_command> {
-      r'\{' -> :raw_cmd_start
-      r'\}' -> :raw_cmd_end %pop
+    mode<command> {
+      r'\}' -> :command_end %pop
       r'\$\{' -> :cmd_param_start @cmd_param
       enum {
-        python: r'(.*?)(?=\$\{|\})' (DOTALL)
-        c: r'(.*?)(?=\$\{|\})' (PCRE_DOTALL)
-        java: r'(.*?)(?=\$\{|\})' (DOTALL)
-        javascript: r'(.*?)(?=\$\{|\})' (m)
+        python: r'(.*?)($\{)' (DOTALL)
+        c: r'(.*?)(\$\{)' (PCRE_DOTALL)
+        java: r'(.*?)(\$\{)' (DOTALL)
+        go: r'(?s)(.*?)(\$\{)'
+        javascript: r'(.*?)(\$\{)' (m)
+      } -> :cmd_part[1] :cmd_param_start[2] @cmd_pram
+      enum {
+        python: r'(.*?)' (DOTALL)
+        c: r'(.*?)' (PCRE_DOTALL)
+        java: r'(.*?)' (DOTALL)
+        go: r'(?s)(.*?)'
+        javascript: r'(.*?)' (m)
       } -> :cmd_part
     }
-    mode<raw_command2> {
-      r'<<<' -> :raw_cmd_start
-      r'>>>' -> :raw_cmd_end %pop
+    mode<command_alt> {
+      r'>>>' -> :command_end %pop
       r'\$\{' -> :cmd_param_start @cmd_param
       enum {
         python: r'(.*?)(?=\$\{|>>>)' (DOTALL)
         c: r'(.*?)(?=\$\{|>>>)' (PCRE_DOTALL)
         java: r'(.*?)(?=\$\{|>>>)' (DOTALL)
+        go: r'(.*?)(?=\$\{|>>>)' (DOTALL)
         javascript: r'(.*?)(?=\$\{|>>>)' (m)
       } -> :cmd_part
     }
@@ -137,7 +150,7 @@ grammar {
       r'\+' -> :plus
       r'\*' -> :asterisk
       r'[0-9]+' -> :integer
-      r'{%_identifier%}(?=\s*=)' -> :cmd_attr_hint[] :identifier
+      r'({%_identifier%})\s*(=)' -> :cmd_attr_hint[] :identifier[1] :equal[2]
       r'(true|false)(?!{%_identifier_follow%})' -> :boolean
       r'{%_type%}(?!{%_identifier_follow%})' -> :type
       r'{%_identifier%}' -> :identifier
@@ -172,14 +185,96 @@ grammar {
       enum {
         python: r'"([^\\\"\n]|\\[\\"\'nrbtfav\?]|\\[0-7]{1,3}|\\x[0-9a-fA-F]+|\\[uU]([0-9a-fA-F]{4})([0-9a-fA-F]{4})?)*"'
         java: "\\\"(?>[^\\\\\\\"\\n]|\\\\[\\\"\\'nrbtfav\\\\?]|\\\\[0-7]{1,3}|\\\\x[0-9a-fA-F]+|\\\\[uU]([0-9a-fA-F]{4})([0-9a-fA-F]{4})?)*\\\""
+        go: "\\\"(?>[^\\\\\\\"\\n]|\\\\[\\\"\\'nrbtfav\\\\?]|\\\\[0-7]{1,3}|\\\\x[0-9a-fA-F]+|\\\\[uU]([0-9a-fA-F]{4})([0-9a-fA-F]{4})?)*\\\""
       } -> unescape(:string)
       enum {
         python: r'\'([^\\\'\n]|\\[\\"\'nrbtfav\?]|\\[0-7]{1,3}|\\x[0-9a-fA-F]+|\\[uU]([0-9a-fA-F]{4})([0-9a-fA-F]{4})?)*\''
         java: "'(?>[^\\\\\\'\\n]|\\\\[\\\"\\'nrbtfav\\\\?]|\\\\[0-7]{1,3}|\\\\x[0-9a-fA-F]+|\\\\[uU]([0-9a-fA-F]{4})([0-9a-fA-F]{4})?)*'"
+        go: "'(?>[^\\\\\\'\\n]|\\\\[\\\"\\'nrbtfav\\\\?]|\\\\[0-7]{1,3}|\\\\x[0-9a-fA-F]+|\\\\[uU]([0-9a-fA-F]{4})([0-9a-fA-F]{4})?)*'"
       } -> unescape(:string)
       r'-?[0-9]+\.[0-9]+' -> :float
       r'[0-9]+' -> :integer
     }
+
+    code<go> << GOLANG
+    type escapeSequence struct {
+      sequence *regexp.Regexp
+      replaceWith string
+    }
+    type charEscape struct {
+      sequence *regexp.Regexp
+      base int
+    }
+
+    type wdlContext struct {
+        wf_or_task string
+        escapeSequences []escapeSequence
+        charEscapes []charEscape
+    }
+    func lexerInit() interface{} {
+        ctx := wdlContext{
+          "",
+          []escapeSequence {
+            escapeSequence{regexp.MustCompile("\\n"), "\n"},
+            escapeSequence{regexp.MustCompile("\\r"), "\r"},
+            escapeSequence{regexp.MustCompile("\\b"), "\b"},
+            escapeSequence{regexp.MustCompile("\\t"), "\t"},
+            escapeSequence{regexp.MustCompile("\\a"), "\a"},
+            escapeSequence{regexp.MustCompile("\\v"), "\v"},
+            escapeSequence{regexp.MustCompile("\\\""), "\""},
+            escapeSequence{regexp.MustCompile("\\'"), "'"},
+            escapeSequence{regexp.MustCompile("\\?"), "?"},
+            escapeSequence{regexp.MustCompile("\\\\"), "\\"}},
+          []charEscape {
+            charEscape{regexp.MustCompile("(\\([0-7]{1,3}))"), 8},
+            charEscape{regexp.MustCompile("(\\[xX]([0-9a-fA-F]{1,4}))"), 16},
+            charEscape{regexp.MustCompile("(\\[uU]([0-9a-fA-F]{4}))"), 16}}}
+        return &ctx
+    }
+    func workflow(ctx *LexerContext, terminal *terminal, sourceString string, line, col int) {
+        switch t := ctx.userContext.(type) {
+          case *wdlContext:
+          t.wf_or_task = "workflow"
+        }
+        default_action(ctx, terminal, sourceString, line, col)
+    }
+    func task(ctx *LexerContext, terminal *terminal, sourceString string, line, col int) {
+        switch t := ctx.userContext.(type) {
+          case *wdlContext:
+          t.wf_or_task = "task"
+        }
+        default_action(ctx, terminal, sourceString, line, col)
+    }
+    func output(ctx *LexerContext, terminal *terminal, sourceString string, line, col int) {
+        switch t := ctx.userContext.(type) {
+          case *wdlContext:
+          if t != nil && t.wf_or_task == "workflow" {
+            ctx.StackPush("wf_output")
+          }
+        }
+        default_action(ctx, terminal, sourceString, line, col)
+    }
+    func unescape(ctx *LexerContext, terminal *terminal, sourceString string, line, col int) {
+        var userCtx *wdlContext
+        userCtx, ok := ctx.userContext.(*wdlContext)
+        if !ok {
+            panic("unescape(): ctx.userContext could not be cast to *wdlContext")
+        }
+        for _, seq := range userCtx.escapeSequences {
+            sourceString = seq.sequence.ReplaceAllString(sourceString, seq.replaceWith)
+        }
+        for _, seq := range userCtx.charEscapes {
+            for _, matchGroup := range seq.sequence.FindAllStringSubmatch(sourceString, -1) {
+                i, err := strconv.ParseInt(matchGroup[1], seq.base, 32)
+                if err != nil {
+                  panic("todo: don't panic here")
+                }
+                sourceString = strings.Replace(sourceString, matchGroup[0], string([]byte{byte(i)}), -1)
+            }
+        }
+        default_action(ctx, terminal, sourceString, line, col)
+    }
+    GOLANG
 
     code<python> << PYTHON
     def init():
@@ -264,7 +359,7 @@ grammar {
     # Task Definition: https://github.com/broadinstitute/wdl/blob/wdl2/SPEC.md#task-definition
     $task = :task :identifier :lbrace list($declaration) list($sections) :rbrace -> Task(name=$1, declarations=$3, sections=$4)
     $sections = $command | $outputs | $runtime | $parameter_meta | $meta
-    $command = :raw_command :raw_cmd_start list($command_part) :raw_cmd_end -> RawCommand(parts=$2)
+    $command = :command :command_start list($command_part) :command_end -> RawCommand(parts=$2)
     $command_part = :cmd_part | $cmd_param
     $cmd_param = :cmd_param_start list($cmd_param_kv) $e :cmd_param_end -> CommandParameter(attributes=$1, expr=$2)
     $cmd_param_kv = :cmd_attr_hint :identifier :equal $e -> CommandParameterAttr(key=$1, value=$3)
