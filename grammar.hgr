@@ -13,7 +13,7 @@ grammar {
       python: r'/\*(.*?)\*/' (DOTALL)
       c: r'/\*(.*?)\*/' (PCRE_DOTALL)
       java: r'/\*(.*?)\*/' (DOTALL)
-      go: r'(?s)/\*(.*?)\*/' (DOTALL)
+      go: r'(?s)/\*(.*?)\*/'
       javascript: r'/\*(.*?)\*/' (m)
     } -> null
 
