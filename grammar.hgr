@@ -3,7 +3,7 @@ grammar {
     partials {
       r'[a-zA-Z]' -> _identifier_start
       r'[a-zA-Z0-9_]' -> _identifier_follow
-      r'(Array|Map|Object|Boolean|Int|Float|Uri|File|String)(?!{%_identifier_follow%})' -> _type
+      r'(Array|Map|Object|Boolean|Int|Float|Uri|File|String)' -> _type
       r'{%_identifier_start%}({%_identifier_follow%})*' -> _identifier
     }
 
@@ -18,36 +18,36 @@ grammar {
     } -> null
 
     r'#.*' -> null
-    r'task(?!{%_identifier_follow%})' -> task(:task)
+    r'task\s+' -> task(:task)
     r'(call)\s+' -> :call[1] @task_fqn
-    r'workflow(?!{%_identifier_follow%})' -> workflow(:workflow)
-    r'import(?!{%_identifier_follow%})' -> :import
-    r'input(?!{%_identifier_follow%})' -> :input
-    r'output(?!{%_identifier_follow%})' -> output(:output)
-    r'as(?!{%_identifier_follow%})' -> :as
-    r'if(?!{%_identifier_follow%})' -> :if
-    r'while(?!{%_identifier_follow%})' -> :while
-    r'runtime(?!{%_identifier_follow%})' -> :runtime
-    r'scatter(?!{%_identifier_follow%})' -> :scatter @scatter
+    r'workflow\s+' -> workflow(:workflow)
+    r'import\s+' -> :import
+    r'input\s+' -> :input
+    r'output\s+' -> output(:output)
+    r'as\s+' -> :as
+    r'if\s+' -> :if
+    r'while\s+' -> :while
+    r'runtime\s+' -> :runtime
+    r'scatter\s+' -> :scatter @scatter
     r'command\s*<<<' -> :command :command_start @command_alt
     r'command\s*\{' -> :command  :command_start @command
-    r'parameter_meta(?!{%_identifier_follow%})' -> :parameter_meta
-    r'meta(?!{%_identifier_follow%})' -> :meta
-    r'(true|false)(?!{%_identifier_follow%})' -> :boolean
+    r'parameter_meta\s+' -> :parameter_meta
+    r'meta\s+' -> :meta
+    r'(true|false)\s+' -> :boolean
     r'(object)\s*(\{)' -> :object :lbrace
-    r'{%_type%}(?!{%_identifier_follow%})' -> :type
+    r'{%_type%}\s+' -> :type
     r'{%_identifier%}' -> :identifier
 
     # TODO: these should probably be partials...
     enum {
       python: r'"([^\\\"\n]|\\[\\"\'nrbtfav\?]|\\[0-7]{1,3}|\\x[0-9a-fA-F]+|\\[uU]([0-9a-fA-F]{4})([0-9a-fA-F]{4})?)*"'
       java: "\\\"(?>[^\\\\\\\"\\n]|\\\\[\\\"\\'nrbtfav\\\\?]|\\\\[0-7]{1,3}|\\\\x[0-9a-fA-F]+|\\\\[uU]([0-9a-fA-F]{4})([0-9a-fA-F]{4})?)*\\\""
-      go: "\\\"(?>[^\\\\\\\"\\n]|\\\\[\\\"\\'nrbtfav\\\\?]|\\\\[0-7]{1,3}|\\\\x[0-9a-fA-F]+|\\\\[uU]([0-9a-fA-F]{4})([0-9a-fA-F]{4})?)*\\\""
+      go: "\\\"([^\\\\\\\"\\n]|\\\\[\\\"\\'nrbtfav\\\\?]|\\\\[0-7]{1,3}|\\\\x[0-9a-fA-F]+|\\\\[uU]([0-9a-fA-F]{4})([0-9a-fA-F]{4})?)*\\\""
     } -> unescape(:string)
     enum {
       python: r'\'([^\\\'\n]|\\[\\"\'nrbtfav\?]|\\[0-7]{1,3}|\\x[0-9a-fA-F]+|\\[uU]([0-9a-fA-F]{4})([0-9a-fA-F]{4})?)*\''
       java: "'(?>[^\\\\\\'\\n]|\\\\[\\\"\\'nrbtfav\\\\?]|\\\\[0-7]{1,3}|\\\\x[0-9a-fA-F]+|\\\\[uU]([0-9a-fA-F]{4})([0-9a-fA-F]{4})?)*'"
-      go: "'(?>[^\\\\\\'\\n]|\\\\[\\\"\\'nrbtfav\\\\?]|\\\\[0-7]{1,3}|\\\\x[0-9a-fA-F]+|\\\\[uU]([0-9a-fA-F]{4})([0-9a-fA-F]{4})?)*'"
+      go: "\\\"([^\\\\\\\"\\n]|\\\\[\\\"\\'nrbtfav\\\\?]|\\\\[0-7]{1,3}|\\\\x[0-9a-fA-F]+|\\\\[uU]([0-9a-fA-F]{4})([0-9a-fA-F]{4})?)*\\\""
     } -> unescape(:string)
 
     r':' -> :colon
@@ -109,7 +109,7 @@ grammar {
       r'\.' -> :dot
       r'\[' -> :lsquare
       r'\]' -> :rsquare
-      r'in(?!{%_identifier_follow%})' -> :in
+      r'in\s+' -> :in
       r'{%_identifier%}' -> :identifier
     }
     mode<command> {
@@ -121,24 +121,31 @@ grammar {
         java: r'(.*?)(\$\{)' (DOTALL)
         go: r'(?s)(.*?)(\$\{)'
         javascript: r'(.*?)(\$\{)' (m)
-      } -> :cmd_part[1] :cmd_param_start[2] @cmd_pram
+      } -> :cmd_part[1] :cmd_param_start[2] @cmd_param
+      enum {
+        python: r'(.*?)(\})' (DOTALL)
+        c: r'(.*?)(\})' (PCRE_DOTALL)
+        java: r'(.*?)(\})' (DOTALL)
+        go: r'(?s)(.*?)(\})'
+        javascript: r'(.*?)(\})' (m)
+      } -> :cmd_part[1] :command_end %pop
+    }
+    mode<command_alt> {
+      r'>>>' -> :command_end %pop
+      r'\$\{' -> :cmd_param_start @cmd_param
+      enum {
+        python: r'(.*?)($\{)' (DOTALL)
+        c: r'(.*?)(\$\{)' (PCRE_DOTALL)
+        java: r'(.*?)(\$\{)' (DOTALL)
+        go: r'(?s)(.*?)(\$\{)'
+        javascript: r'(.*?)(\$\{)' (m)
+      } -> :cmd_part[1] :cmd_param_start[2] @cmd_param
       enum {
         python: r'(.*?)' (DOTALL)
         c: r'(.*?)' (PCRE_DOTALL)
         java: r'(.*?)' (DOTALL)
         go: r'(?s)(.*?)'
         javascript: r'(.*?)' (m)
-      } -> :cmd_part
-    }
-    mode<command_alt> {
-      r'>>>' -> :command_end %pop
-      r'\$\{' -> :cmd_param_start @cmd_param
-      enum {
-        python: r'(.*?)(?=\$\{|>>>)' (DOTALL)
-        c: r'(.*?)(?=\$\{|>>>)' (PCRE_DOTALL)
-        java: r'(.*?)(?=\$\{|>>>)' (DOTALL)
-        go: r'(.*?)(?=\$\{|>>>)' (DOTALL)
-        javascript: r'(.*?)(?=\$\{|>>>)' (m)
       } -> :cmd_part
     }
     mode<cmd_param> {
@@ -151,8 +158,8 @@ grammar {
       r'\*' -> :asterisk
       r'[0-9]+' -> :integer
       r'({%_identifier%})\s*(=)' -> :cmd_attr_hint[] :identifier[1] :equal[2]
-      r'(true|false)(?!{%_identifier_follow%})' -> :boolean
-      r'{%_type%}(?!{%_identifier_follow%})' -> :type
+      r'(true|false)\s+' -> :boolean
+      r'{%_type%}\s+' -> :type
       r'{%_identifier%}' -> :identifier
 
       # Expression tokens
@@ -185,12 +192,12 @@ grammar {
       enum {
         python: r'"([^\\\"\n]|\\[\\"\'nrbtfav\?]|\\[0-7]{1,3}|\\x[0-9a-fA-F]+|\\[uU]([0-9a-fA-F]{4})([0-9a-fA-F]{4})?)*"'
         java: "\\\"(?>[^\\\\\\\"\\n]|\\\\[\\\"\\'nrbtfav\\\\?]|\\\\[0-7]{1,3}|\\\\x[0-9a-fA-F]+|\\\\[uU]([0-9a-fA-F]{4})([0-9a-fA-F]{4})?)*\\\""
-        go: "\\\"(?>[^\\\\\\\"\\n]|\\\\[\\\"\\'nrbtfav\\\\?]|\\\\[0-7]{1,3}|\\\\x[0-9a-fA-F]+|\\\\[uU]([0-9a-fA-F]{4})([0-9a-fA-F]{4})?)*\\\""
+        go: "\\\"([^\\\\\\\"\\n]|\\\\[\\\"\\'nrbtfav\\\\?]|\\\\[0-7]{1,3}|\\\\x[0-9a-fA-F]+|\\\\[uU]([0-9a-fA-F]{4})([0-9a-fA-F]{4})?)*\\\""
       } -> unescape(:string)
       enum {
         python: r'\'([^\\\'\n]|\\[\\"\'nrbtfav\?]|\\[0-7]{1,3}|\\x[0-9a-fA-F]+|\\[uU]([0-9a-fA-F]{4})([0-9a-fA-F]{4})?)*\''
         java: "'(?>[^\\\\\\'\\n]|\\\\[\\\"\\'nrbtfav\\\\?]|\\\\[0-7]{1,3}|\\\\x[0-9a-fA-F]+|\\\\[uU]([0-9a-fA-F]{4})([0-9a-fA-F]{4})?)*'"
-        go: "'(?>[^\\\\\\'\\n]|\\\\[\\\"\\'nrbtfav\\\\?]|\\\\[0-7]{1,3}|\\\\x[0-9a-fA-F]+|\\\\[uU]([0-9a-fA-F]{4})([0-9a-fA-F]{4})?)*'"
+        go: "\\\"([^\\\\\\\"\\n]|\\\\[\\\"\\'nrbtfav\\\\?]|\\\\[0-7]{1,3}|\\\\x[0-9a-fA-F]+|\\\\[uU]([0-9a-fA-F]{4})([0-9a-fA-F]{4})?)*\\\""
       } -> unescape(:string)
       r'-?[0-9]+\.[0-9]+' -> :float
       r'[0-9]+' -> :integer
@@ -226,9 +233,9 @@ grammar {
             escapeSequence{regexp.MustCompile("\\?"), "?"},
             escapeSequence{regexp.MustCompile("\\\\"), "\\"}},
           []charEscape {
-            charEscape{regexp.MustCompile("(\\([0-7]{1,3}))"), 8},
-            charEscape{regexp.MustCompile("(\\[xX]([0-9a-fA-F]{1,4}))"), 16},
-            charEscape{regexp.MustCompile("(\\[uU]([0-9a-fA-F]{4}))"), 16}}}
+            charEscape{regexp.MustCompile("(\\\\([0-7]{1,3}))"), 8},
+            charEscape{regexp.MustCompile("(\\\\[xX]([0-9a-fA-F]{1,4}))"), 16},
+            charEscape{regexp.MustCompile("(\\\\[uU]([0-9a-fA-F]{4}))"), 16}}}
         return &ctx
     }
     func workflow(ctx *LexerContext, terminal *terminal, sourceString string, line, col int) {
