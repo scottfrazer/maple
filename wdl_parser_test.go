@@ -3,20 +3,22 @@ package maple
 import (
 	"io/ioutil"
 	"os"
+	"strings"
 	"testing"
 )
 
-func TestWdlParser(t *testing.T) {
-	bytes, err := ioutil.ReadFile("test.wdl")
-	if err != nil {
-		panic(err)
-	}
-
+func assertWdlAst(t *testing.T, wdlPath string) {
+	t.Parallel()
 	parser := NewWdlParser()
 	lexer := NewWdlLexer()
 	handler := &DefaultSyntaxErrorHandler{}
 
-	tokens, err := lexer.Lex(string(bytes), "test.wdl", handler)
+	bytes, err := ioutil.ReadFile(wdlPath)
+	if err != nil {
+		panic(err)
+	}
+
+	tokens, err := lexer.Lex(string(bytes), wdlPath, handler)
 	if err != nil {
 		panic(err)
 	}
@@ -28,19 +30,35 @@ func TestWdlParser(t *testing.T) {
 
 	ast := tree.Ast()
 
-	if _, err := os.Stat("test.wdl.ast"); os.IsNotExist(err) {
-		ioutil.WriteFile("test.wdl.ast", []byte(ast.PrettyString()), 0644)
+	astPath := wdlPath + ".ast"
+	if _, err := os.Stat(astPath); os.IsNotExist(err) {
+		ioutil.WriteFile(astPath, []byte(ast.PrettyString()), 0644)
 	}
 
-	bytes, err = ioutil.ReadFile("test.wdl.ast")
+	bytes, err = ioutil.ReadFile(astPath)
 	if err != nil {
 		panic(err)
 	}
 
-	expected := string(bytes)
+	expected := strings.TrimRight(string(bytes), "\r\n ")
 	actual := ast.PrettyString()
 
 	if actual != expected {
-		t.Fatalf("Expecting ASTs to be equal")
+		t.Fatalf("%s: Expecting AST to look like contents of %s", wdlPath, astPath)
+	}
+}
+
+func TestWdlParser(t *testing.T) {
+	files, err := ioutil.ReadDir("test/parse")
+	if err != nil {
+		panic(err)
+	}
+
+	for _, file := range files {
+		if strings.HasSuffix(file.Name(), ".wdl") {
+			t.Run(file.Name(), func(t *testing.T) {
+				assertWdlAst(t, "test/parse/"+file.Name())
+			})
+		}
 	}
 }

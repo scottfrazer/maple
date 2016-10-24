@@ -1,0 +1,9 @@
+(Namespace:
+  imports=[],
+  body=[
+    (Workflow:
+      name=<test/parse/1.wdl:1:10 identifier "dw==">,
+      body=[]
+    )
+  ]
+)
