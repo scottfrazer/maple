@@ -1,58 +1,9 @@
 (Namespace:
   imports=[],
   body=[
-    (Task:
-      name=<test/parse/0.wdl:1:6 identifier "eA==">,
-      declarations=[
-        (Declaration:
-          type=<test/parse/0.wdl:2:3 type "SW50IA==">,
-          postfix=None,
-          name=<test/parse/0.wdl:2:7 identifier "aQ==">,
-          expression=None
-        )
-      ],
-      sections=[
-        (RawCommand:
-          parts=[
-            <test/parse/0.wdl:3:12 cmd_part "CiAgICBlY2hvIA==">,
-            (CommandParameter:
-              attributes=[],
-              expr=(Add:
-                lhs=<test/parse/0.wdl:4:12 identifier "aQ==">,
-                rhs=<test/parse/0.wdl:4:14 integer "MQ==">
-              )
-            ),
-            <test/parse/0.wdl:4:16 cmd_part "CiAg">
-          ]
-        ),
-        (Outputs:
-          attributes=[
-            (Output:
-              type=<test/parse/0.wdl:7:5 type "SW50IA==">,
-              name=<test/parse/0.wdl:7:9 identifier "bw==">,
-              expression=(FunctionCall:
-                name=<test/parse/0.wdl:7:13 identifier "cmVhZF9pbnQ=">,
-                params=[
-                  (FunctionCall:
-                    name=<test/parse/0.wdl:7:22 identifier "c3Rkb3V0">,
-                    params=[]
-                  )
-                ]
-              )
-            )
-          ]
-        )
-      ]
-    ),
     (Workflow:
-      name=<test/parse/0.wdl:11:10 identifier "dw==">,
-      body=[
-        (Call:
-          task=<test/parse/0.wdl:12:8 fqn "eA==">,
-          alias=None,
-          body=None
-        )
-      ]
+      name=<test/parse/0.wdl:1:10 identifier "dw==">,
+      body=[]
     )
   ]
 )
