@@ -1,0 +1,95 @@
+(Namespace:
+  imports=[],
+  body=[
+    (Task:
+      name=<test/parse/3.wdl:1:6 identifier "eA==">,
+      declarations=[
+        (Declaration:
+          type=<test/parse/3.wdl:2:3 type "SW50IA==">,
+          postfix=None,
+          name=<test/parse/3.wdl:2:7 identifier "aQ==">,
+          expression=None
+        )
+      ],
+      sections=[
+        (RawCommand:
+          parts=[
+            <test/parse/3.wdl:4:12 cmd_part "CiAgICBlY2hvIA==">,
+            (CommandParameter:
+              attributes=[],
+              expr=(Add:
+                lhs=<test/parse/3.wdl:5:12 identifier "aQ==">,
+                rhs=<test/parse/3.wdl:5:16 integer "MQ==">
+              )
+            ),
+            <test/parse/3.wdl:5:18 cmd_part "IA==">,
+            (CommandParameter:
+              attributes=[],
+              expr=<test/parse/3.wdl:5:21 identifier "cw==">
+            ),
+            <test/parse/3.wdl:5:23 cmd_part "IA==">,
+            (CommandParameter:
+              attributes=[],
+              expr=(Add:
+                lhs=<test/parse/3.wdl:5:26 identifier "Zg==">,
+                rhs=<test/parse/3.wdl:5:30 float "My4y">
+              )
+            ),
+            <test/parse/3.wdl:5:34 cmd_part "IA==">,
+            (CommandParameter:
+              attributes=[],
+              expr=(FunctionCall:
+                name=<test/parse/3.wdl:5:37 identifier "am9pbg==">,
+                params=[
+                  <test/parse/3.wdl:5:42 identifier "aQ==">,
+                  <test/parse/3.wdl:5:45 string "IiwgIg==">
+                ]
+              )
+            ),
+            <test/parse/3.wdl:5:51 cmd_part "IA==">,
+            (CommandParameter:
+              attributes=[],
+              expr=(ArrayOrMapLookup:
+                lhs=<test/parse/3.wdl:5:54 identifier "bQ==">,
+                rhs=<test/parse/3.wdl:5:56 string "Ighmb28IIg==">
+              )
+            ),
+            <test/parse/3.wdl:5:63 cmd_part "CiAg">
+          ]
+        ),
+        (Outputs:
+          attributes=[
+            (Output:
+              type=<test/parse/3.wdl:9:5 type "SW50IA==">,
+              name=<test/parse/3.wdl:9:9 identifier "bw==">,
+              expression=(FunctionCall:
+                name=<test/parse/3.wdl:9:13 identifier "cmVhZF9pbnQ=">,
+                params=[
+                  (FunctionCall:
+                    name=<test/parse/3.wdl:9:22 identifier "c3Rkb3V0">,
+                    params=[]
+                  )
+                ]
+              )
+            )
+          ]
+        )
+      ]
+    ),
+    (Workflow:
+      name=<test/parse/3.wdl:13:10 identifier "dw==">,
+      body=[
+        (Call:
+          task=<test/parse/3.wdl:14:8 fqn "eA==">,
+          alias=None,
+          body=None
+        ),
+        (Call:
+          task=<test/parse/3.wdl:15:8 fqn "eA==">,
+          alias=<test/parse/3.wdl:15:13 identifier "eQ==">,
+          body=None
+        )
+      ]
+    )
+  ]
+)
