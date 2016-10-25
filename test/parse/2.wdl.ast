@@ -1,0 +1,181 @@
+(Namespace:
+  imports=[],
+  body=[
+    (Task:
+      name=<test/parse/2.wdl:1:6 identifier "eA==">,
+      declarations=[
+        (Declaration:
+          type=<test/parse/2.wdl:2:3 type "SW50IA==">,
+          postfix=None,
+          name=<test/parse/2.wdl:2:7 identifier "aQ==">,
+          expression=None
+        ),
+        (Declaration:
+          type=<test/parse/2.wdl:3:3 type "U3RyaW5nIA==">,
+          postfix=None,
+          name=<test/parse/2.wdl:3:10 identifier "cw==">,
+          expression=None
+        ),
+        (Declaration:
+          type=<test/parse/2.wdl:4:3 type "RmxvYXQg">,
+          postfix=None,
+          name=<test/parse/2.wdl:4:9 identifier "Zg==">,
+          expression=None
+        ),
+        (Declaration:
+          type=(Type:
+            name=<test/parse/2.wdl:5:3 type "QXJyYXk=">,
+            subtype=[
+              <test/parse/2.wdl:5:9 type "SW50">
+            ]
+          ),
+          postfix=None,
+          name=<test/parse/2.wdl:5:14 identifier "aQ==">,
+          expression=None
+        ),
+        (Declaration:
+          type=(Type:
+            name=<test/parse/2.wdl:6:3 type "TWFw">,
+            subtype=[
+              <test/parse/2.wdl:6:7 type "U3RyaW5n">,
+              <test/parse/2.wdl:6:15 type "U3RyaW5n">
+            ]
+          ),
+          postfix=None,
+          name=<test/parse/2.wdl:6:23 identifier "bQ==">,
+          expression=None
+        )
+      ],
+      sections=[
+        (RawCommand:
+          parts=[
+            <test/parse/2.wdl:8:12 cmd_part "CiAgICBlY2hvIA==">,
+            (CommandParameter:
+              attributes=[],
+              expr=(Add:
+                lhs=<test/parse/2.wdl:9:12 identifier "aQ==">,
+                rhs=<test/parse/2.wdl:9:16 integer "MQ==">
+              )
+            ),
+            <test/parse/2.wdl:9:18 cmd_part "IA==">,
+            (CommandParameter:
+              attributes=[],
+              expr=<test/parse/2.wdl:9:21 identifier "cw==">
+            ),
+            <test/parse/2.wdl:9:23 cmd_part "IA==">,
+            (CommandParameter:
+              attributes=[],
+              expr=(Add:
+                lhs=<test/parse/2.wdl:9:26 identifier "Zg==">,
+                rhs=<test/parse/2.wdl:9:30 float "My4y">
+              )
+            ),
+            <test/parse/2.wdl:9:34 cmd_part "IA==">,
+            (CommandParameter:
+              attributes=[],
+              expr=(FunctionCall:
+                name=<test/parse/2.wdl:9:37 identifier "am9pbg==">,
+                params=[
+                  <test/parse/2.wdl:9:42 identifier "aQ==">,
+                  <test/parse/2.wdl:9:45 string "IiwgIg==">
+                ]
+              )
+            ),
+            <test/parse/2.wdl:9:51 cmd_part "IA==">,
+            (CommandParameter:
+              attributes=[],
+              expr=(ArrayOrMapLookup:
+                lhs=<test/parse/2.wdl:9:54 identifier "bQ==">,
+                rhs=<test/parse/2.wdl:9:56 string "Ighmb28IIg==">
+              )
+            ),
+            <test/parse/2.wdl:9:63 cmd_part "CiAg">
+          ]
+        ),
+        (Outputs:
+          attributes=[
+            (Output:
+              type=<test/parse/2.wdl:13:5 type "SW50IA==">,
+              name=<test/parse/2.wdl:13:9 identifier "bzE=">,
+              expression=(FunctionCall:
+                name=<test/parse/2.wdl:13:14 identifier "cmVhZF9pbnQ=">,
+                params=[
+                  (FunctionCall:
+                    name=<test/parse/2.wdl:13:23 identifier "c3Rkb3V0">,
+                    params=[]
+                  )
+                ]
+              )
+            ),
+            (Output:
+              type=<test/parse/2.wdl:14:5 type "U3RyaW5nIA==">,
+              name=<test/parse/2.wdl:14:12 identifier "bzI=">,
+              expression=(FunctionCall:
+                name=<test/parse/2.wdl:14:17 identifier "cmVhZF9zdHJpbmc=">,
+                params=[
+                  (FunctionCall:
+                    name=<test/parse/2.wdl:14:29 identifier "c3Rkb3V0">,
+                    params=[]
+                  )
+                ]
+              )
+            ),
+            (Output:
+              type=<test/parse/2.wdl:15:5 type "RmxvYXQg">,
+              name=<test/parse/2.wdl:15:11 identifier "bzM=">,
+              expression=<test/parse/2.wdl:15:16 float "Mi4z">
+            ),
+            (Output:
+              type=(Type:
+                name=<test/parse/2.wdl:16:5 type "QXJyYXk=">,
+                subtype=[
+                  <test/parse/2.wdl:16:11 type "SW50">
+                ]
+              ),
+              name=<test/parse/2.wdl:16:16 identifier "bzQ=">,
+              expression=(ArrayLiteral:
+                values=[
+                  <test/parse/2.wdl:16:22 integer "MQ==">,
+                  <test/parse/2.wdl:16:24 integer "Mg==">,
+                  <test/parse/2.wdl:16:26 integer "Mw==">
+                ]
+              )
+            ),
+            (Output:
+              type=(Type:
+                name=<test/parse/2.wdl:17:5 type "TWFw">,
+                subtype=[
+                  <test/parse/2.wdl:17:9 type "U3RyaW5n">,
+                  <test/parse/2.wdl:17:17 type "SW50">
+                ]
+              ),
+              name=<test/parse/2.wdl:17:22 identifier "bzU=">,
+              expression=(MapLiteral:
+                map=[
+                  (MapLiteralKv:
+                    key=<test/parse/2.wdl:17:28 string "Ighmb28IIg==">,
+                    value=<test/parse/2.wdl:17:35 integer "MA==">
+                  ),
+                  (MapLiteralKv:
+                    key=<test/parse/2.wdl:17:38 string "IghiYXIIIg==">,
+                    value=<test/parse/2.wdl:17:45 integer "MQ==">
+                  )
+                ]
+              )
+            )
+          ]
+        )
+      ]
+    ),
+    (Workflow:
+      name=<test/parse/2.wdl:21:10 identifier "dw==">,
+      body=[
+        (Call:
+          task=<test/parse/2.wdl:22:8 fqn "eA==">,
+          alias=None,
+          body=None
+        )
+      ]
+    )
+  ]
+)

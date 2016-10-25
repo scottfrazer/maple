@@ -36,6 +36,9 @@ grammar {
     r'(true|false)\s+' -> :boolean
     r'(object)\s*(\{)' -> :object :lbrace
     r'{%_type%}\s+' -> :type
+    r'({%_type%})(\[)' -> :type[1] :lsquare[2]
+    r'({%_type%})(\])' -> :type[1] :rsquare[2]
+    r'({%_type%})(,)' -> :type[1] :comma[2]
     r'{%_identifier%}' -> :identifier
 
     # TODO: these should probably be partials...
@@ -156,7 +159,6 @@ grammar {
       r'=' -> :equal
       r'\+' -> :plus
       r'\*' -> :asterisk
-      r'[0-9]+' -> :integer
       r'({%_identifier%})\s*(=)' -> :cmd_attr_hint[] :identifier[1] :equal[2]
       r'(true|false)\s+' -> :boolean
       r'{%_type%}\s+' -> :type
