@@ -50,9 +50,18 @@ func TestWdlNamespace1(t *testing.T) {
 		t.Fatalf("%s: expecting workflow to have name 'w'", wdlPath)
 	}
 	if len(ns.workflows[0].body) != 1 {
-		t.Fatalf("%s: expecting workflow 'w' to have one element in body")
+		t.Fatalf("%s: expecting workflow 'w' to have one element in body", wdlPath)
+	}
+	switch node := ns.workflows[0].body[0].(type) {
+	case *Call:
+		if node.task.name != "x" {
+			t.Fatalf("%s: expecting call statement to point to task 'x'", wdlPath)
+		}
 	}
 	if len(ns.tasks) != 1 {
 		t.Fatalf("%s: expecting 1 task", wdlPath)
+	}
+	if ns.tasks[0].name != "x" {
+		t.Fatalf("%s: expecting task to be named 'x'", wdlPath)
 	}
 }
