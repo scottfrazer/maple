@@ -1,0 +1,51 @@
+(Namespace:
+  imports=[
+    (Import:
+      uri=<test/parse/4.wdl:1:8 string "IggwCC4Id2RsCCI=">,
+      namespace=None
+    ),
+    (Import:
+      uri=<test/parse/4.wdl:2:8 string "IggyCC4Id2RsCCI=">,
+      namespace=<test/parse/4.wdl:2:19 identifier "bnM=">
+    )
+  ],
+  body=[
+    (Declaration:
+      type=<test/parse/4.wdl:4:1 type "RmxvYXQg">,
+      postfix=None,
+      name=<test/parse/4.wdl:4:7 identifier "cGk=">,
+      expression=<test/parse/4.wdl:4:12 float "My4xNA==">
+    ),
+    (Task:
+      name=<test/parse/4.wdl:6:6 identifier "eQ==">,
+      declarations=[],
+      sections=[
+        (RawCommand:
+          parts=[
+            <test/parse/4.wdl:7:12 cmd_part "IGVjaG8g">,
+            (CommandParameter:
+              attributes=[],
+              expr=<test/parse/4.wdl:7:20 identifier "cGk=">
+            ),
+            <test/parse/4.wdl:7:23 cmd_part "IA==">
+          ]
+        )
+      ]
+    ),
+    (Workflow:
+      name=<test/parse/4.wdl:10:10 identifier "d2Y=">,
+      body=[
+        (Call:
+          task=<test/parse/4.wdl:11:8 fqn "eQ==">,
+          alias=None,
+          body=None
+        ),
+        (Call:
+          task=<test/parse/4.wdl:12:8 fqn "bnMueA==">,
+          alias=None,
+          body=None
+        )
+      ]
+    )
+  ]
+)

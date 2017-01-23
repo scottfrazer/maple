@@ -2,8 +2,8 @@ WDL parser
 ==========
 
 [DONE] 1) hermes go target all tests passing
-2) generate WDL parser, parse and print out pretty AST string
-3) Add parser.go to maple
+[DONE] 2) generate WDL parser, parse and print out pretty AST string
+[DONE] 3) Add parser.go to maple
 
 User Interface
 ==============

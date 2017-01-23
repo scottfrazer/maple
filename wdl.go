@@ -14,15 +14,79 @@ type Expression struct {
 	ast *Ast
 }
 
-func (*Expression) Eval(map[string]WdlValue) (*WdlValue, error) {
+func (*Expression) Eval(map[string]WdlValue) (WdlValue, error) {
 	return nil, nil
 }
 
 type Command struct {
-	ast *Ast
+	ast   *Ast
+	parts []CommandPart
 }
 
-type WdlValue struct {
+func (*Command) Instantiate(inputs map[string]WdlValue) string {
+	return "echo 3"
+}
+
+type CommandPart interface {
+	Instantiate(inputs map[string]WdlValue) string
+}
+
+type CommandPartString struct {
+	str string
+}
+
+func (part *CommandPartString) Instantiate(inputs map[string]WdlValue) string {
+	return part.str
+}
+
+type CommandPartExpression struct {
+	expr *Expression
+}
+
+func (part *CommandPartExpression) Instantiate(inputs map[string]WdlValue) string {
+	return "foobar"
+}
+
+type WdlType interface {
+	Equals(other WdlType) bool
+	WdlString() string
+}
+
+type WdlIntegerType struct{}
+
+func (WdlIntegerType) Equals(other WdlType) bool {
+	switch other.(type) {
+	case WdlIntegerType:
+		return true
+	default:
+		return false
+	}
+}
+
+func (WdlIntegerType) WdlString() string {
+	return "Int"
+}
+
+type WdlValue interface {
+	Add(other WdlValue) (WdlValue, error)
+	Type() WdlType
+}
+
+type WdlIntegerValue struct {
+	value int
+}
+
+func (l WdlIntegerValue) Add(other WdlValue) (WdlValue, error) {
+	switch r := other.(type) {
+	case WdlIntegerValue:
+		return WdlIntegerValue{l.value + r.value}, nil
+	default:
+		return nil, fmt.Errorf("Cannot add")
+	}
+}
+
+func (v WdlIntegerValue) Type() WdlType {
+	return WdlIntegerType{}
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -205,6 +269,7 @@ type Task struct {
 
 func loadTask(ast *Ast) (*Task, error) {
 	task := Task{}
+	fmt.Println(ast.PrettyString())
 	task.name = ast.attributes["name"].(*Token).sourceString
 	if val, ok := ast.attributes["declarations"]; ok {
 		for _, declAstNode := range *val.(*AstList) {
@@ -216,7 +281,46 @@ func loadTask(ast *Ast) (*Task, error) {
 			task.declarations = append(task.declarations, decl)
 		}
 	}
+
+	if val, ok := ast.attributes["sections"]; ok {
+		for _, sectionAstNode := range *val.(*AstList) {
+			sectionAst := sectionAstNode.(*Ast)
+			switch sectionAst.name {
+			case "RawCommand":
+				command, err := loadCommand(sectionAst)
+				if err != nil {
+					return nil, err
+				}
+				task.command = command
+			case "Outputs":
+			}
+		}
+	}
 	return &task, nil
+}
+
+func loadCommand(ast *Ast) (*Command, error) {
+	command := Command{ast: ast}
+	for _, cmdPartAst := range *ast.attributes["parts"].(*AstList) {
+		switch t := cmdPartAst.(type) {
+		case *Token:
+			command.parts = append(command.parts, &CommandPartString{t.sourceString})
+		case *Ast:
+			if t.name != "CommandParameter" {
+				return nil, fmt.Errorf("expecting 'CommandParameter' AST, got %s", ast.String())
+			}
+			expr, err := loadExpression(t.attributes["expr"].(*Ast))
+			if err != nil {
+				return nil, err
+			}
+			command.parts = append(command.parts, &CommandPartExpression{expr})
+		}
+	}
+	return &command, nil
+}
+
+func loadExpression(ast *Ast) (*Expression, error) {
+	return &Expression{ast: ast}, nil
 }
 
 type Declaration struct {

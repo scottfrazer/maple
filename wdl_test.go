@@ -57,11 +57,20 @@ func TestWdlNamespace1(t *testing.T) {
 		if node.task.name != "x" {
 			t.Fatalf("%s: expecting call statement to point to task 'x'", wdlPath)
 		}
+	default:
+		t.Fatalf("%s: expecting first body element in workflow to be a call statement", wdlPath)
 	}
 	if len(ns.tasks) != 1 {
 		t.Fatalf("%s: expecting 1 task", wdlPath)
 	}
 	if ns.tasks[0].name != "x" {
 		t.Fatalf("%s: expecting task to be named 'x'", wdlPath)
+	}
+
+	inputs := make(map[string]WdlValue)
+	inputs["i"] = &WdlIntegerValue{2}
+	instantiatedCommand := ns.tasks[0].command.Instantiate(inputs)
+	if instantiatedCommand != "echo 3" {
+		t.Fatalf("%s: expecting command to instantiate to 'echo 3', got %s", wdlPath, instantiatedCommand)
 	}
 }
