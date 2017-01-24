@@ -3,6 +3,7 @@ package maple
 import (
 	"fmt"
 	"io/ioutil"
+	"strings"
 )
 
 type GraphNode interface {
@@ -23,8 +24,47 @@ type Command struct {
 	parts []CommandPart
 }
 
-func (*Command) Instantiate(inputs map[string]WdlValue) string {
-	return "echo 3"
+func (c *Command) Instantiate(inputs map[string]WdlValue) string {
+	var stringParts []string
+	for _, part := range c.parts {
+		stringParts = append(stringParts, part.Instantiate(inputs))
+	}
+
+	instantiatedCommand := strings.TrimLeft(strings.Join(stringParts, ""), "\n")
+	instantiatedCommand = strings.TrimRight(instantiatedCommand, " \n")
+	if len(instantiatedCommand) == 0 {
+		return instantiatedCommand
+	}
+
+	commonLineWhitespace := 9999
+	counting := true
+	currentLineWhitespace := 0
+	for _, char := range instantiatedCommand {
+		if counting && char == ' ' {
+			currentLineWhitespace += 1
+			continue
+		}
+		counting = false
+		if currentLineWhitespace < commonLineWhitespace {
+			commonLineWhitespace = currentLineWhitespace
+		}
+		if char == '\n' {
+			currentLineWhitespace = 0
+			counting = true
+		}
+	}
+
+	stringParts = nil
+	strippedString := ""
+	for _, line := range strings.Split(instantiatedCommand, "\n") {
+		if len(line) == 0 {
+			strippedString = "\n"
+		} else {
+			strippedString = line[commonLineWhitespace:]
+		}
+		stringParts = append(stringParts, strippedString)
+	}
+	return strings.Join(stringParts, "")
 }
 
 type CommandPart interface {
@@ -44,7 +84,7 @@ type CommandPartExpression struct {
 }
 
 func (part *CommandPartExpression) Instantiate(inputs map[string]WdlValue) string {
-	return "foobar"
+	return "3"
 }
 
 type WdlType interface {
