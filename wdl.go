@@ -3,6 +3,7 @@ package maple
 import (
 	"fmt"
 	"io/ioutil"
+	"strconv"
 	"strings"
 )
 
@@ -15,8 +16,32 @@ type Expression struct {
 	ast *Ast
 }
 
-func (*Expression) Eval(map[string]WdlValue) (WdlValue, error) {
-	return nil, nil
+func (expr *Expression) Evaluate(inputs map[string]WdlValue) (WdlValue, error) {
+	return evaluate(expr.ast, inputs)
+}
+
+func evaluate(node AstNode, inputs map[string]WdlValue) (WdlValue, error) {
+	switch n := node.(type) {
+	case *Ast:
+		if n.name == "Add" {
+			lhs, err := evaluate(n.attributes["lhs"], inputs)
+			if err != nil {
+				return nil, err
+			}
+			rhs, err := evaluate(n.attributes["rhs"], inputs)
+			if err != nil {
+				return nil, err
+			}
+			return lhs.Add(rhs)
+		}
+	case *Token:
+		num, err := strconv.Atoi(n.sourceString)
+		if err != nil {
+			return inputs[n.sourceString], nil
+		}
+		return WdlIntegerValue{num}, nil
+	}
+	return nil, fmt.Errorf("fill me in")
 }
 
 type Command struct {
@@ -24,16 +49,20 @@ type Command struct {
 	parts []CommandPart
 }
 
-func (c *Command) Instantiate(inputs map[string]WdlValue) string {
+func (c *Command) Instantiate(inputs map[string]WdlValue) (string, error) {
 	var stringParts []string
 	for _, part := range c.parts {
-		stringParts = append(stringParts, part.Instantiate(inputs))
+		partString, err := part.Instantiate(inputs)
+		if err != nil {
+			return "", err
+		}
+		stringParts = append(stringParts, partString)
 	}
 
 	instantiatedCommand := strings.TrimLeft(strings.Join(stringParts, ""), "\n")
 	instantiatedCommand = strings.TrimRight(instantiatedCommand, " \n")
 	if len(instantiatedCommand) == 0 {
-		return instantiatedCommand
+		return instantiatedCommand, nil
 	}
 
 	commonLineWhitespace := 9999
@@ -64,27 +93,31 @@ func (c *Command) Instantiate(inputs map[string]WdlValue) string {
 		}
 		stringParts = append(stringParts, strippedString)
 	}
-	return strings.Join(stringParts, "")
+	return strings.Join(stringParts, ""), nil
 }
 
 type CommandPart interface {
-	Instantiate(inputs map[string]WdlValue) string
+	Instantiate(inputs map[string]WdlValue) (string, error)
 }
 
 type CommandPartString struct {
 	str string
 }
 
-func (part *CommandPartString) Instantiate(inputs map[string]WdlValue) string {
-	return part.str
+func (part *CommandPartString) Instantiate(inputs map[string]WdlValue) (string, error) {
+	return part.str, nil
 }
 
 type CommandPartExpression struct {
 	expr *Expression
 }
 
-func (part *CommandPartExpression) Instantiate(inputs map[string]WdlValue) string {
-	return "3"
+func (part *CommandPartExpression) Instantiate(inputs map[string]WdlValue) (string, error) {
+	value, err := part.expr.Evaluate(inputs)
+	if err != nil {
+		return "", err
+	}
+	return value.String(), nil
 }
 
 type WdlType interface {
@@ -110,6 +143,7 @@ func (WdlIntegerType) WdlString() string {
 type WdlValue interface {
 	Add(other WdlValue) (WdlValue, error)
 	Type() WdlType
+	String() string
 }
 
 type WdlIntegerValue struct {
@@ -127,6 +161,10 @@ func (l WdlIntegerValue) Add(other WdlValue) (WdlValue, error) {
 
 func (v WdlIntegerValue) Type() WdlType {
 	return WdlIntegerType{}
+}
+
+func (v WdlIntegerValue) String() string {
+	return strconv.Itoa(v.value)
 }
 
 ///////////////////////////////////////////////////////////////////////////////

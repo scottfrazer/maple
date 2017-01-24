@@ -69,7 +69,10 @@ func TestWdlNamespace1(t *testing.T) {
 
 	inputs := make(map[string]WdlValue)
 	inputs["i"] = &WdlIntegerValue{2}
-	instantiatedCommand := ns.tasks[0].command.Instantiate(inputs)
+	instantiatedCommand, err := ns.tasks[0].command.Instantiate(inputs)
+	if err != nil {
+		t.Fatalf("%s: error when instantiating command: %s", wdlPath, err)
+	}
 	if instantiatedCommand != "echo 3" {
 		t.Fatalf("%s: expecting command to instantiate to 'echo 3', got %s", wdlPath, instantiatedCommand)
 	}
