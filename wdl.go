@@ -44,6 +44,8 @@ func evaluate(node AstNode, inputs map[string]WdlValue) (WdlValue, error) {
 				return nil, fmt.Errorf("integer token %v does not contain an integer", n)
 			}
 			return WdlIntegerValue{num}, nil
+		case "string":
+			return WdlStringValue{strings.Trim(n.sourceString, "\"")}, nil
 		default:
 			return nil, fmt.Errorf("fill me in")
 		}
@@ -132,6 +134,21 @@ type WdlType interface {
 	WdlString() string
 }
 
+type WdlStringType struct{}
+
+func (WdlStringType) Equals(other WdlType) bool {
+	switch other.(type) {
+	case WdlStringType:
+		return true
+	default:
+		return false
+	}
+}
+
+func (WdlStringType) WdlString() string {
+	return "String"
+}
+
 type WdlIntegerType struct{}
 
 func (WdlIntegerType) Equals(other WdlType) bool {
@@ -162,7 +179,7 @@ func (l WdlIntegerValue) Add(other WdlValue) (WdlValue, error) {
 	case WdlIntegerValue:
 		return WdlIntegerValue{l.value + r.value}, nil
 	default:
-		return nil, fmt.Errorf("Cannot add")
+		return nil, fmt.Errorf("fill me in")
 	}
 }
 
@@ -172,6 +189,27 @@ func (v WdlIntegerValue) Type() WdlType {
 
 func (v WdlIntegerValue) String() string {
 	return strconv.Itoa(v.value)
+}
+
+type WdlStringValue struct {
+	value string
+}
+
+func (l WdlStringValue) Add(other WdlValue) (WdlValue, error) {
+	switch r := other.(type) {
+	case WdlStringValue:
+		return WdlStringValue{l.value + r.value}, nil
+	default:
+		return nil, fmt.Errorf("fill me in")
+	}
+}
+
+func (v WdlStringValue) Type() WdlType {
+	return WdlStringType{}
+}
+
+func (v WdlStringValue) String() string {
+	return v.value
 }
 
 ///////////////////////////////////////////////////////////////////////////////
