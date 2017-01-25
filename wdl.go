@@ -35,11 +35,18 @@ func evaluate(node AstNode, inputs map[string]WdlValue) (WdlValue, error) {
 			return lhs.Add(rhs)
 		}
 	case *Token:
-		num, err := strconv.Atoi(n.sourceString)
-		if err != nil {
+		switch n.TerminalType() {
+		case "identifier":
 			return inputs[n.sourceString], nil
+		case "integer":
+			num, err := strconv.Atoi(n.sourceString)
+			if err != nil {
+				return nil, fmt.Errorf("integer token %v does not contain an integer", n)
+			}
+			return WdlIntegerValue{num}, nil
+		default:
+			return nil, fmt.Errorf("fill me in")
 		}
-		return WdlIntegerValue{num}, nil
 	}
 	return nil, fmt.Errorf("fill me in")
 }
@@ -347,7 +354,6 @@ type Task struct {
 
 func loadTask(ast *Ast) (*Task, error) {
 	task := Task{}
-	fmt.Println(ast.PrettyString())
 	task.name = ast.attributes["name"].(*Token).sourceString
 	if val, ok := ast.attributes["declarations"]; ok {
 		for _, declAstNode := range *val.(*AstList) {
